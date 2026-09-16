@@ -42,13 +42,24 @@
          不是"机制上不可能"。v2.1.0 据此实现【离线开关注入】（菜单 [7]->2）：
          读/写本机 stableID -> 现场算键 -> 按 LevelDB WriteBatch 格式写缓存，
          全程无代理无联网。本机已完整 E2E 实测：删缓存变英文，注入变回中文。
+    · 【v2.1.3 修正 · 必看】离线注入曾连着三次「报成功却无效」，根因是脚本内部
+      CRC32C 的初值写成了裸的 0xFFFFFFFF —— PowerShell 会把它当 Int32 解析成 -1，
+      于是算出的记录 crc 全是错的；而 leveldb 在 Recover 时会【静默丢弃 crc 非法的
+      记录】，所以注入其实一条都没生效：应用读到的 stableID 一直是它自己的，
+      缓存键自然对不上。修复 + 三道防呆：
+        ① 0xFFFFFFFF -> 0xFFFFFFFFL（全脚本唯一漏 L 的一处，其余 6 处本来就带）；
+        ② 注入前跑标准测试向量 crc32c("123456789") = 0xE3069283 自检，不过就拒绝写入；
+        ③ 注入后按 crc 复读校验（旧版只看结构，坏记录也能"通过自检"）；
+        ④ 同一份 payload 改写成 4 个变体键名（uid 空 / ua-<sid> × cids 全量 / 仅
+           stableID），不同 SDK 版本或登录态下取值不同时也能命中，纯冗余兜底。
 #>
 [CmdletBinding()]
 param(
     [ValidateSet('menu', 'check', 'apply', 'restore', 'languages', 'clean', 'net', 'launch', 'report', 'switch', 'inject', 'diag')]
     [string]$Action = 'menu',
     [string]$Language = '',
-    [switch]$Yes
+    [switch]$Yes,
+    [switch]$Pause
 )
 
 $ErrorActionPreference = 'Stop'
@@ -61,7 +72,7 @@ if ($PSScriptRoot) { $script:Root = $PSScriptRoot }
 else { $script:Root = Split-Path -Parent $MyInvocation.MyCommand.Definition }
 
 $script:AppName   = '睡醒的夜猫子 · Codex 一键汉化'
-$script:Version   = 'v2.1.0'
+$script:Version   = 'v2.1.3'
 $script:CfgPath   = Join-Path $env:USERPROFILE '.wakecat-i18n.json'
 $script:CodexHome = Join-Path $env:USERPROFILE '.codex'
 $script:ConfigToml = Join-Path $script:CodexHome 'config.toml'
@@ -82,7 +93,7 @@ $script:StatsigUrl   = 'https://ab.chatgpt.com/v1/initialize?k=client-sYWqzCYMRk
 # 离线注入用常量（v2.1.0，全部经 app.asar 逐字确认 + 本机 E2E 实测）：
 #  · 缓存键 = DJB2("uid:|cids:source_surface_stable_id-<sid>,stableID-<sid>|k:<sdkKey>")，DJB2 初值为 0
 #  · stable_id 的存储键后缀 = DJB2("k:"+sdkKey) = 685440364，跨机器常量
-$script:OfflineStableId = '0e19a6c2-4a5b-4d8e-b3f7-2c9d8e1f0a36'
+$script:OfflineStableId = '0e19a6c2-4a5b-4d8e-b3f7-2c9d8e1f0a36'   # 仅作参考，实际不再使用（凭空造 sid 会导致键对不上）
 $script:InnerTemplateB64 = 'H4sIAGCyqmoC/41Uy27bMBD8F51tQZKtV26FE6DpIwl6SFEUBUGTK5s1TQp8OFED/3uXkhy5SVP0JHG4OxzO7vIpaoA6b4BsqAMbXTwdZxHvFN0LRphWjdiMoKQdmDMoKrMsLdI6C/8YD9HFBM0i4yUQwRHk0FAvHWIWMJ1T0xF4bLXFU5Ho+49ZdABjhVbRRZrigkoPgVRqRpHEam9YYL++vEISUHQdqNMK453xgNoEJ65rQ4y3YK4vMUxYwuEgGJA1tYA6GiotYPpjKwUTjrTUoGiHJw8avOIgIbjAyRtCj8EGcQACygnXkXDr0Z2ejVinzQlxIliSllWd54uizOtFPou21BLf8sHqIB5N4bu7kDymQbh+L2IHXe8z80i7v77sF4MZBCU1NHzdYEbvc03rRQJsnidVM1+WvJjjmfmcc6izktGkLKtQhD4FPfrPjHDpDSgwFC+HSZYZ2oq5AhtKihfaEt8bHPGf61B5pvctVR2RzLtXBjhqNuAIbdtT1sJ8e/eR1yv6/uH281X6Zb+Vtw+fkIeDQa85aQRIPjihvXKmw6QPd6HEbUjP43IZF1WcLZeIrY1+wBYgzx0VpXkWJ3GCe9reTyhCcVakSdhANdNOVsR1UsVlUqXFRHj/V76boe2/CsUxaooe8dXWaPyZVKkXuLYnaKJA7PCmzLOtFzqHYUH813a+uomOQ2lCL/NdaKWT3VldLZJlXWZ5KBVVxGCvm9DydiAeu3JYjrtCbQjWP/RznOBsP4NrPHZ3Nl2v01osImUd8juH676OJ2yveVC8FyroDUIbSYeQYco5kXpD4IDzRkJbmT9Fjk/BP2JG2rNXq5/f/omxhHqnUWqDKVsiFL4FuDEOPwYXSYL5jZeSsC2wnfV7VFvVZbpMlxn2QZLhtCR5Fh1/A1jfDOFHBQAA'
 
 # PowerShell 5.1 / .NET 4.x 默认可能只协商 TLS 1.0，直连 Cloudflare 会握手失败
@@ -334,6 +345,57 @@ function Copy-FileTreePlain {
         } catch { return -1 }
     }
     $n
+}
+
+function Copy-FileTreeEfs([string]$Source, [string]$Dest) {
+    # EFS 安全递归复制：读出明文 -> 写成新文件。
+    # MSIX 的 LocalCache 整棵树带 FILE_ATTRIBUTE_ENCRYPTED，Copy-Item 复制必报
+    # "The specified file could not be encrypted."（Win32 6000，本机实测）；
+    # robocopy /COPYALL 会带 EFS 属性（需管理员，exit 16）。逐字节读写不走加密语义，最稳。
+    # 返回 $true 表示所有文件已复制且长度与源一致。
+    if (-not (Test-Path -LiteralPath $Dest)) { New-Item -ItemType Directory -Path $Dest -Force | Out-Null }
+    $srcLen = $Source.TrimEnd([char]92).Length
+    $ok = $true; $n = 0
+    foreach ($f in @(Get-ChildItem -LiteralPath $Source -File -Force -Recurse -ErrorAction SilentlyContinue)) {
+        $rel = $f.FullName.Substring($srcLen).TrimStart([char]92)
+        $target = Join-Path $Dest $rel
+        $tdir = Split-Path -Parent $target
+        if ($tdir -and -not (Test-Path -LiteralPath $tdir)) { New-Item -ItemType Directory -Path $tdir -Force | Out-Null }
+        try {
+            if ($f.Length -eq 0) {
+                [System.IO.File]::WriteAllBytes($target, (New-Object byte[] 0))
+            } else {
+                $bytes = Read-FileBytes $f.FullName
+                if ($null -eq $bytes) { $ok = $false; continue }
+                [System.IO.File]::WriteAllBytes($target, $bytes)
+            }
+            if ([System.IO.File]::ReadAllBytes($target).Length -ne $f.Length) { $ok = $false }
+            $n++
+        } catch { $ok = $false }
+    }
+    return ($ok -and $n -gt 0)
+}
+
+function Test-IsElevated {
+    try {
+        $wp = New-Object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())
+        return $wp.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch { return $false }
+}
+
+function Invoke-SelfElevate {
+    # 以管理员权限重新拉起本工具。
+    # 用途：应用的数据文件若由「管理员权限的进程」创建过，会带高完整性标签(High IL)，
+    #       普通权限下只读不可写（DACL 里看不出任何异常，报错就是"访问被拒绝"）。
+    param([string]$Action = 'menu')
+    $ps     = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $self   = $script:PSCommandPath
+    if (-not $self -or -not (Test-Path -LiteralPath $self)) { $self = Join-Path $script:Root 'Codex一键汉化.ps1' }
+    $psArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $self + '"'), '-Action', $Action, '-Pause')
+    Write-C '  正在请求管理员权限…（会弹出 UAC 确认框，请选"是"）' 'Yellow'
+    try { Start-Process -FilePath $ps -ArgumentList $psArgs -Verb RunAs -ErrorAction Stop }
+    catch { Write-C "  [X] 提权失败或被取消：$($_.Exception.Message)" 'Red'; return }
+    Write-C '  已在新窗口中以管理员身份继续；本窗口可以关闭了。' 'Green'
 }
 
 function Get-WebProfileRoots {
@@ -1185,7 +1247,8 @@ function Invoke-Apply([string]$locale) {
     Write-Host ''
     Write-C '  若条件二也通过了、界面仍是英文：完全退出应用（托盘图标右键 -> 退出）后重启即可。' 'Gray'
     Write-C '  若条件二没通过：进菜单 [7] —— 有代理走「自检修复」，无代理/离线走「离线注入」。' 'Yellow'
-    Write-C '  （v1.2.0 的「汉化加速包」已删除：缓存键绑登录身份，跨机器搬运必然失效。）' 'DarkGray'
+    Write-C '  （v1.2.0 的「汉化加速包」已删除：搬来的缓存键绑的是原机器的 stableID，' 'DarkGray'
+    Write-C '    换台机器就对不上号 —— 所以改成「读本机 stableID 现场算键再注入」。）' 'DarkGray'
 }
 
 function Invoke-Check {
@@ -1371,7 +1434,9 @@ function Get-Crc32cBytes([byte[]]$Data) {
         }
         $script:Crc32cTable = $tbl
     }
-    $crc = [long]0xFFFFFFFF
+    # 注意：初值必须写 0xFFFFFFFFL（带 L）。PS 会把裸的 0xFFFFFFFF 当 Int32 解析成 -1，
+    # 于是 -shr 8 退化成算术右移，整条 CRC 全歪（v2.1.2 的注入失效就是这个一字符的病）。
+    $crc = [long]0xFFFFFFFFL
     foreach ($b in $Data) {
         $crc = ($script:Crc32cTable[[int](($crc -bxor $b) -band 0xFF)] -bxor ($crc -shr 8)) -band 0xFFFFFFFFL
     }
@@ -1393,12 +1458,15 @@ function Write-VarintTo([System.IO.MemoryStream]$ms, [int]$Value) {
     }
 }
 
-function Read-LevelDbLogTail([string]$LogPath) {
+function Read-LevelDbLogTail([string]$LogPath, [switch]$VerifyCrc) {
     # 扫描 .log 全部记录（含 FIRST/MIDDLE/LAST 分片重组），返回末尾偏移、最大 seq、
     # 以及最后一条 statsig.stable_id 的值（若在 .log 里）。
+    # -VerifyCrc：逐条校验 crc32c。leveldb 恢复时会【丢弃 crc 非法的记录】，
+    #   所以「结构能解析」不等于「记录真的生效」——自检必须按 crc 判定，
+    #   否则写坏了也报成功（v2.1.2 就是这么骗过自检的）。
     $bytes = [System.IO.File]::ReadAllBytes($LogPath)
     $n = $bytes.Length; $pos = 0
-    $st = @{ MaxSeq = [uint64]0; Sid = $null; SidSeq = [uint64]0 }
+    $st = @{ MaxSeq = [uint64]0; Sid = $null; SidSeq = [uint64]0; BadCrc = 0; Checked = 0; EvalCnt = 0 }
     $buf = $null
     $flush = {
         param([byte[]]$Batch, [hashtable]$St)
@@ -1419,6 +1487,7 @@ function Read-LevelDbLogTail([string]$LogPath) {
             $val = New-Object byte[] $vl
             [Array]::Copy($Batch, $off, $val, 0, $vl); $off += $vl
             $ks = [Text.Encoding]::ASCII.GetString($key)
+            if ($ks -like '*statsig.cached.evaluations.*') { $St.EvalCnt = [int]$St.EvalCnt + 1 }
             if ($ks -like '*statsig.stable_id.685440364' -and $seq -ge $St.SidSeq) {
                 $St.SidSeq = $seq
                 $St.Sid = [Text.Encoding]::UTF8.GetString($val)
@@ -1436,6 +1505,16 @@ function Read-LevelDbLogTail([string]$LogPath) {
         if ($pos + 7 + $len -gt $n) { break }
         $body = New-Object byte[] $len
         [Array]::Copy($bytes, $pos + 7, $body, 0, $len)
+        if ($VerifyCrc) {
+            # 物理记录 = [crc(4)][len(2)][type(1)][data]；crc 覆盖 type 字节 + data
+            $st.Checked = [int]$st.Checked + 1
+            $hb = New-Object byte[] ($len + 1)
+            $hb[0] = [byte]$typ
+            [Array]::Copy($body, 0, $hb, 1, $len)
+            if ([BitConverter]::ToUInt32($bytes, $pos) -ne (Get-MaskedCrc (Get-Crc32cBytes $hb))) {
+                $st.BadCrc = [int]$st.BadCrc + 1
+            }
+        }
         if     ($typ -eq 1) { & $flush $body $st; $buf = $null }
         elseif ($typ -eq 2) { $buf = $body }
         elseif ($typ -eq 3) { $buf = @($buf) + @($body) }
@@ -1443,6 +1522,20 @@ function Read-LevelDbLogTail([string]$LogPath) {
         $pos += 7 + $len
     }
     [pscustomobject]@{ EndPos = $pos; MaxSeq = $st.MaxSeq; StableIdRaw = $st.Sid; Size = $n }
+}
+
+function Get-LevelDbStableId([string]$LevelDbDir) {
+    # 兜底：目标 .log 里读不到 stable_id 时（被压缩进 .ldb、或日志轮转过），
+    # 扫目录下所有 .log，取 seq 最大的那条（应用首次启动会写入一次 stable_id）。
+    $best = $null; $bestSeq = [uint64]0
+    foreach ($f in @(Get-ChildItem -LiteralPath $LevelDbDir -Filter '*.log' -File -Force -ErrorAction SilentlyContinue)) {
+        try {
+            $t = Read-LevelDbLogTail -LogPath $f.FullName
+            $m = [regex]::Match("$($t.StableIdRaw)", "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+            if ($m.Success -and $t.MaxSeq -ge $bestSeq) { $bestSeq = $t.MaxSeq; $best = $m.Value.ToLowerInvariant() }
+        } catch { }
+    }
+    return $best
 }
 
 function Write-LevelDbBatch([string]$LogPath, [int64]$AtOffset, [uint64]$Seq, [byte[][]]$Keys, [byte[][]]$Values) {
@@ -1497,6 +1590,18 @@ function Write-LevelDbBatch([string]$LogPath, [int64]$AtOffset, [uint64]$Seq, [b
 function Invoke-OfflineInject {
     param([switch]$NoPrompt)
     Write-Host ''
+
+    # ---- 内部 CRC32C 自检（标准测试向量 crc32c("123456789") = 0xE3069283）----
+    # 写进 leveldb 的记录，crc 一旦算错，leveldb 恢复时会【静默丢弃整条记录】，
+    # 表现为「脚本报成功、界面照样英文」。这里先验算法本身；用字符串比较，
+    # 彻底避开 PS 十六进制字面量的符号解析坑。
+    $crcProbe = '{0:X8}' -f (Get-Crc32cBytes ([Text.Encoding]::ASCII.GetBytes('123456789')))
+    if ($crcProbe -ne 'E3069283') {
+        Write-C ("  [X] 内部 CRC32C 自检失败（算出 $crcProbe，应为 E3069283），" ) 'Red'
+        Write-C '      为免写出 leveldb 无法识别的坏记录，已拒绝执行。' 'Red'
+        return
+    }
+
     Write-C '  === 离线开关注入 ==============================================' 'Cyan'
     Write-C '  面向「国内无代理 / 离线」的机器：不联网，直接把汉化开关' 'Gray'
     Write-C '  （enable_i18n = true）写进应用本地缓存。原理：缓存键只由本机' 'Gray'
@@ -1522,22 +1627,88 @@ function Invoke-OfflineInject {
         if ($running.Count -gt 0) { Write-C '  [X] 应用仍在运行，已取消。' 'Red'; return }
     }
 
+    # 写入权限预检：
+    # 实测：应用自己创建的缓存文件（MSIX LocalCache 里的 EFS「应用级保护」加密文件）对普通进程
+    # 呈「可读不可写」——访问被拒绝，ACL/属性里看不出异常，提权也无效。
+    # 但同目录的**目录本身**可重命名、也可新建，新建出来的文件就是可写的。
+    # 所以检测到写不进去时，自动切到「整目录换血」方案（见下方 if ($rebuild) 分支），无需管理员。
+    $log = @(Get-ChildItem -LiteralPath $ldb -Filter '*.log' | Sort-Object LastWriteTime -Descending)[0]
+    if (-not $log) { Write-C '  [X] 未找到 .log 文件。' 'Red'; return }
+    $writeOk = $false
+    try {
+        $fs = [System.IO.File]::Open($log.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+        $fs.Close(); $writeOk = $true
+    } catch { }
+    $rebuild = $false
+    if (-not $writeOk) {
+        Write-Host ''
+        Write-C "  [!] 缓存文件无法直接写入（访问被拒绝）：$($log.Name)" 'Yellow'
+        Write-C '      这是应用数据的「应用级保护」EFS 加密特性：普通进程可读不可写，' 'Gray'
+        Write-C '      提权也无效（不是权限标签问题）。' 'Gray'
+        Write-C '      -> 自动改用「整目录换血」：原目录整体改名留档，新建同名目录，' 'Gray'
+        Write-C '         把缓存逐字节复制过去（新文件由本工具创建 -> 可写），在副本上注入。' 'Gray'
+        Write-C '         原目录原样保留，随时可还原。' 'Gray'
+        if (-not $NoPrompt -and (Test-Interactive)) {
+            Write-Host ''
+            $c = Read-Host '  继续用「整目录换血」方式注入？(Y/n)'
+            if ($c -match '^[nN]') { Write-C '  已取消。' 'Gray'; return }
+        }
+        $rebuild = $true
+    }
+    if (-not $rebuild) { Write-C ("    · 目标缓存        : $($log.Name)（可写）") 'Green' }
+
     # 备份（必做，失败即中止）
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $dst = Join-Path $script:BackupDir ("leveldb.$stamp")
+    if ($rebuild) {
+        # 换血模式的"备份"就是原目录本身：整体改名留档，内容原样不动，最强留档。
+        $keepName = 'leveldb.orig-' + $stamp
+        $keep = Join-Path (Split-Path -Parent $ldb) $keepName
+        try {
+            if (Test-Path -LiteralPath $keep) { throw "留档目录已存在：$keep" }
+            Rename-Item -LiteralPath $ldb -NewName $keepName -ErrorAction Stop
+            Write-C ("    · 原目录改名留档  : $keep") 'Green'
+            New-Item -ItemType Directory -Path $ldb -Force -ErrorAction Stop | Out-Null
+            if (-not (Copy-FileTreeEfs -Source $keep -Dest $ldb)) { throw '逐字节复制未全部成功' }
+            $n = @(Get-ChildItem -LiteralPath $ldb -File -Force -Recurse -ErrorAction SilentlyContinue).Count
+            if ($n -lt 3) { throw "新目录文件数异常（$n）" }
+            Write-C ("    · 已重建缓存目录  : $ldb （$n 个文件，本工具创建 -> 可写）") 'Green'
+            $log = @(Get-ChildItem -LiteralPath $ldb -Filter '*.log' | Sort-Object LastWriteTime -Descending)[0]
+            if (-not $log) { throw '新目录中没有 .log 文件' }
+            $chk = $false
+            try { $fs = [System.IO.File]::Open($log.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite); $fs.Close(); $chk = $true } catch { }
+            if (-not $chk) { throw '新目录里的 .log 仍不可写' }
+        } catch {
+            Write-C "  [X] 换血失败：$($_.Exception.Message)" 'Red'
+            Write-C '      正在回滚到原目录…' 'Gray'
+            try {
+                if ((Test-Path -LiteralPath $ldb) -and (Test-Path -LiteralPath $keep)) { Remove-Item -LiteralPath $ldb -Recurse -Force -ErrorAction SilentlyContinue }
+                if ((Test-Path -LiteralPath $keep) -and -not (Test-Path -LiteralPath $ldb)) { Rename-Item -LiteralPath $keep -NewName (Split-Path -Leaf $ldb) -ErrorAction SilentlyContinue }
+                Write-C ('      回滚完成：' + $(if (Test-Path -LiteralPath $ldb) { '原目录已还原' } else { '请手工把 ' + $keep + ' 改回 leveldb' })) 'Yellow'
+            } catch { Write-C "      回滚也失败：$($_.Exception.Message)（原目录仍在 $keep）" 'Red' }
+            return
+        }
+    } else {
     try {
         if (-not (Test-Path -LiteralPath $script:BackupDir)) { New-Item -ItemType Directory -Path $script:BackupDir | Out-Null }
-        Copy-Item -LiteralPath $ldb -Destination $dst -Recurse -Force -ErrorAction Stop
-        $n = @(Get-ChildItem -LiteralPath $dst -File -Force -ErrorAction SilentlyContinue).Count
-        if ($n -lt 3) { throw "备份文件数异常（$n）" }
+        # MSIX 的 LocalCache 树带 EFS 加密属性：Copy-Item 必报 Win32 6000（本机实测过），
+        # 所以走逐字节复制；万一失败退 robocopy；仍不行就中止（绝不允许无备份写入）。
+        $copied = Copy-FileTreeEfs -Source $ldb -Dest $dst
+        $n = @(Get-ChildItem -LiteralPath $dst -File -Force -Recurse -ErrorAction SilentlyContinue).Count
+        if (-not $copied -or $n -lt 3) {
+            if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Recurse -Force -ErrorAction SilentlyContinue }
+            $copied = Copy-FileTree -Source $ldb -Dest $dst
+            $n = @(Get-ChildItem -LiteralPath $dst -File -Force -Recurse -ErrorAction SilentlyContinue).Count
+        }
+        if (-not $copied -or $n -lt 3) { throw "备份不完整（$n 个文件）——可能是杀软拦截或权限不足" }
         Write-C ("    · 已备份到        : $dst （$n 个文件）") 'Green'
     } catch {
         Write-C "  [X] 备份失败，已中止注入：$($_.Exception.Message)" 'Red'
         return
     }
+    }
 
-    # 选最新的 .log 并解析尾部
-    $log = @(Get-ChildItem -LiteralPath $ldb -Filter '*.log' | Sort-Object LastWriteTime -Descending)[0]
+    # 选最新的 .log 并解析尾部（$log 已在写入预检时取好）
     if (-not $log) { Write-C '  [X] 未找到 .log 文件。' 'Red'; return }
     $tail = Read-LevelDbLogTail -LogPath $log.FullName
     if ($tail.EndPos -ne $tail.Size) {
@@ -1546,19 +1717,40 @@ function Invoke-OfflineInject {
     }
     Write-C ("    · 写入目标        : $($log.Name)（现有 $($tail.MaxSeq) 号之前的记录，最大 seq $($tail.MaxSeq)）") 'Gray'
 
-    # stableID：优先用 .log 里已有的；没有则写入固定值
-    $sid = $null; $putStable = $false
-    if ($tail.StableIdRaw) {
-        $v = $tail.StableIdRaw.Trim('"').Trim()
-        if ($v -match '^[0-9a-fA-F-]{36}$') { $sid = $v.ToLowerInvariant() }
+    # stableID：必须用「应用自己的」那个（应用首次启动会生成并写进缓存）。
+    # 坑：解析器返回的是原始 value（形如 \x01"uuid"），必须从中抠出 UUID，
+    #     否则整串匹配失败 -> 误判"没有 stableID" -> 凭空造一个 -> 缓存键必然对不上。
+    $sid = $null
+    $m = [regex]::Match("$($tail.StableIdRaw)", "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+    if ($m.Success) { $sid = $m.Value.ToLowerInvariant() }
+    if (-not $sid) { $sid = Get-LevelDbStableId -LevelDbDir $ldb }
+    if (-not $sid) {
+        Write-Host ''
+        Write-C '  [X] 读不到应用自己的 stableID，已中止 —— 凭空造一个的键一定对不上。' 'Red'
+        Write-C '      缓存键 = DJB2("…stableID-<本机sid>…")，只有拿到应用真正在用的 sid 才算得准。' 'Gray'
+        Write-C '      解决：先启动一次应用（离线也行，界面会是英文），完全退出后再执行本功能；' 'Yellow'
+        Write-C '            应用首次启动会把 stableID 写进缓存，那时就读得到了。' 'Yellow'
+        return
     }
-    if (-not $sid) { $sid = $script:OfflineStableId; $putStable = $true }
-    Write-C ("    · 本机 stableID   : $sid" + $(if ($putStable) { '（将写入）' } else { '（沿用现有）' })) 'Gray'
+    Write-C ("    · 本机 stableID   : $sid  （应用自己的，键按它算）") 'Gray'
+    $putStable = $true   # 顺手把 stable_id 也写成同一个值，保证与应用自洽
 
-    # 键名现场计算（公式：DJB2("uid:|cids:source_surface_stable_id-<sid>,stableID-<sid>|k:<sdkKey>")）
-    $keyStr = "uid:|cids:source_surface_stable_id-$sid,stableID-$sid|k:$($script:StatsigKey)"
-    $evalSuffix = Get-DJB2Hash $keyStr
+    # 键名现场计算。主公式（在 app.asar 里逐字核对过）：
+    #     DJB2("uid:|cids:source_surface_stable_id-<sid>,stableID-<sid>|k:<sdkKey>")
+    # 另外再写 3 个变体键作保险：uid 取空还是 ua-<sid>、cids 是否含
+    # source_surface_stable_id，在不同 SDK 版本 / 不同登录态下可能不同。
+    # 多写几份键不影响应用任何逻辑，纯冗余兜底（应用只按自己那个键取）。
+    $cidsFull = "source_surface_stable_id-$sid,stableID-$sid"
+    $cidsSolo = "stableID-$sid"
+    $combo = @(
+        @('',         $cidsFull),
+        @("ua-$sid",  $cidsFull),
+        @('',         $cidsSolo),
+        @("ua-$sid",  $cidsSolo)
+    )
+    $evalSuffix = Get-DJB2Hash ("uid:$($combo[0][0])|cids:$($combo[0][1])|k:$($script:StatsigKey)")
     Write-C ("    · 缓存键（现场算）: statsig.cached.evaluations.$evalSuffix") 'Gray'
+    Write-C ("      另写 " + ($combo.Count - 1) + " 个变体键名兜底（uid / cids 写法差异）") 'DarkGray'
 
     # payload：内嵌模板解压 -> 套上外层（stableID 用本机的）
     $inner = $null
@@ -1584,27 +1776,38 @@ function Invoke-OfflineInject {
         $keys.Add([byte[]]($kp + [Text.Encoding]::ASCII.GetBytes('statsig.stable_id.685440364')))
         $vals.Add([byte[]](@(0x01) + [Text.Encoding]::ASCII.GetBytes('"' + $sid + '"')))
     }
-    $keys.Add([byte[]]($kp + [Text.Encoding]::ASCII.GetBytes("statsig.cached.evaluations.$evalSuffix")))
-    $vals.Add([byte[]](@(0x01) + [Text.Encoding]::ASCII.GetBytes($outer)))
+    foreach ($cb in $combo) {
+        $sfx = Get-DJB2Hash ("uid:$($cb[0])|cids:$($cb[1])|k:$($script:StatsigKey)")
+        $keys.Add([byte[]]($kp + [Text.Encoding]::ASCII.GetBytes("statsig.cached.evaluations.$sfx")))
+        $vals.Add([byte[]](@(0x01) + [Text.Encoding]::ASCII.GetBytes($outer)))
+    }
 
-    Write-C ("    · 写入内容        : 裁剪版开关缓存（" + $outer.Length + " 字节，含 enable_i18n = true）") 'Gray'
+    Write-C ("    · 写入内容        : 开关缓存 " + $outer.Length + " 字节 x " + $combo.Count + " 个键名（含 enable_i18n = true）") 'Gray'
     try {
         Write-LevelDbBatch -LogPath $log.FullName -AtOffset $tail.EndPos -Seq ([uint64]($tail.MaxSeq + 1)) -Keys $keys.ToArray() -Values $vals.ToArray()
     } catch {
         Write-C "  [X] 写入失败：$($_.Exception.Message)" 'Red'
+        if ("$($_.Exception.Message)" -match '拒绝|denied') {
+            Write-C '      访问被拒绝通常是权限问题：请以管理员身份重新运行本工具再试。' 'Yellow'
+        }
         Write-C "      备份在 $dst ，可直接还原。" 'Gray'
         return
     }
 
-    # 自校验：重读 .log，确认两条记录可被解析
-    $tail2 = Read-LevelDbLogTail -LogPath $log.FullName
-    $ok = ($tail2.EndPos -eq $tail2.Size) -and ($tail2.StableIdRaw -and $tail2.StableIdRaw.Contains($sid))
+    # 自校验：重读 .log，确认写入的记录「真能被 leveldb 恢复」——
+    # 结构可解析 **且** crc32c 合法 **且** 缓存条目确实在里面。
+    # （旧版只看结构：crc 写错也照样报成功，应用却完全读不到 —— v2.1.2 就是这么骗过自检的。）
+    $tail2 = Read-LevelDbLogTail -LogPath $log.FullName -VerifyCrc
+    $sidOk = [bool]($tail2.StableIdRaw -and $tail2.StableIdRaw.Contains($sid))
+    $ok = ($tail2.EndPos -eq $tail2.Size) -and ($tail2.BadCrc -eq 0) -and ($tail2.Checked -ge 1) -and ($tail2.EvalCnt -ge 1) -and $sidOk
     if ($ok) {
-        Write-C '  [OK] 注入完成，且 .log 复读自检通过。' 'Green'
-        Write-C '       启动 / 重启应用即可看到中文界面 —— 全程无需代理。' 'White'
-        Write-C "       （应用下次能联网时会照常向服务端刷新，结果一致，不影响。）" 'DarkGray'
+        Write-C ("  [OK] 注入完成，自检通过（已校验 crc 的记录 " + $tail2.Checked + " 条 / 非法 0 条）。") 'Green'
+        Write-C ("       缓存条目 " + $tail2.EvalCnt + " 条已就位，启动 / 重启应用即可看到中文界面 —— 全程无需代理。") 'White'
+        Write-C '       （应用下次能联网时会照常向服务端刷新，结果一致，不影响。）' 'DarkGray'
     } else {
-        Write-C '  [X] 自检未通过（复读解析异常）。请从备份还原后重试。' 'Red'
+        Write-C ("  [X] 自检未通过：crc 非法的记录 " + $tail2.BadCrc + " 条 / 已校验 " + $tail2.Checked + " 条，") 'Red'
+        Write-C ("      尾部解析 " + $tail2.EndPos + " / " + $tail2.Size + "，缓存条目 " + $tail2.EvalCnt + " 条。") 'Red'
+        Write-C '      多半是写入被截断或被杀软改写；请从备份还原后重试。' 'Yellow'
         return
     }
 
@@ -2017,4 +2220,11 @@ try {
     Write-Host ''
     Write-C ("  [异常] " + $_.Exception.Message) 'Red'
     Write-C ("  " + $_.InvocationInfo.PositionMessage) 'DarkGray'
+}
+
+# 提权重启时（-Pause）留一个停顿，否则新窗口执行完立刻消失、看不到输出
+if ($Pause) {
+    Write-Host ''
+    Write-C '  按回车关闭此窗口…' 'DarkGray'
+    [void](Read-Host)
 }
