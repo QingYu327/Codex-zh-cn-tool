@@ -632,3 +632,49 @@ warning … sa_server_request_failed routePattern=/settings/user
 ```
 
 且 `~/.codex/auth.json` 不存在。**重置应用会清掉登录态 → 该菜单项消失；重新登录后自动恢复。**
+
+---
+
+## 三个高频问题（v2.1.4 实测回答）
+
+### Q1：汉化能用多久？什么时候要重跑？
+
+| 内容 | 有效期 |
+|---|---|
+| 条件一（`config.toml` 的 `localeOverride`） | **永久** |
+| 条件二（注入的 statsig 开关缓存） | **长期有效**，直到「应用数据被重置」 |
+
+- 应用**能联网**时会照常拉真实配置并覆盖缓存 —— 服务端那个开关是**无条件恒为 true**，
+  所以覆盖后结果一致，**仍然中文**。
+- 商店升级**不会**让它失效（本工具一个应用文件都没改）。
+- 唯一要重跑的情况：**重置 / 清理了应用数据**（Local Storage 被清空）。届时重跑 `[7]` 即可，幂等。
+
+### Q2：「文件 → 打开文件夹」为什么不见了？
+
+**和汉化无关，也和代理无关。** 该菜单项要求命令的 `requiredAccess`（`codexOrWorkLocal`）
+成立，而 `codexLocal` / `workLocal` 只在 **`authMethod === 'chatgpt'`**（用 ChatGPT 账号登录）
+且套餐属 `free/go/plus/prolite/pro` 时才判为 allowed。
+
+本机 `config.toml` 是 API Key 方式（`preferred_auth_method = "apikey"`、
+`forced_login_method = "api"`，模型走 DeepSeek）→ 直接落到 `denied: unsupported-surface`
+→ 菜单项被主进程摘掉。**只有改用 ChatGPT 账号登录才会回来。**
+
+### Q3：「浏览器操控 / 电脑操控：已被你的组织停用，或在你所在地区不可用」——挂代理能开吗？
+
+这句话对应 i18n key `settings.browserPlugin.restrictedAvailabilityDescription`，
+是内建 Browser / Chromium 插件「访问受限」的通用说明。它要**三者同时成立**：
+
+1. 服务端下发的**插件资格**（`featureName: browser_use` / `computer_use` 等）；
+2. 对应的 **statsig 开关**为 true；
+3. 平台 / 窗口类型等环境条件满足。
+
+**挂代理只是必要条件，不是充分条件**：它让请求能到达服务器而已；资格本身还取决于账号
+（本机是 API Key + 第三方模型提供商，这类云侧插件在资格链上就不通过），电脑操控还额外
+需要本地 sidecar 与账号权限。
+
+另外要知道：**离线注入的是一份「裁剪版」statsig 响应**（只有 `enable_i18n` 那一个 layer，
+其余开关是空的），所以依赖 statsig 的功能会被**确定地**判为不可用
+（应用日志里能看到 `reason=statsig-disabled`）。
+
+> 想要「开关齐全 + 中文」，只能让应用**真的连上一次 `ab.chatgpt.com`**（系统代理/TUN
+> 且规则覆盖该域名），让它自己把完整配置落盘 —— 那时就不需要离线注入了。
