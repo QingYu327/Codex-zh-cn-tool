@@ -12,11 +12,36 @@
     旧方案 = 把 app.asar 复制到用户目录再打补丁  ->  依赖 Node、占 1.8GB、
              每次商店更新都会失效、且会把官方 196 键的完整中文覆盖成 73 键的残缺中文。
     本方案 = 使用应用官方自带的 localeOverride 配置开关 + 官方已内置的 64 种语言资源，
-             不再改动任何应用文件，升级后依然有效，完全离线，无需 VPN。
+             不再改动任何应用文件，升级后依然有效。
+
+  【v2.0.0 必读】界面变中文需要两个条件同时成立：
+    条件一  ~/.codex/config.toml 里 [desktop] localeOverride = "zh-CN"
+            <- 本工具负责，纯本地即可完成。
+    条件二  应用远程开关 enable_i18n = true
+            <- 由应用在启动时向 https://ab.chatgpt.com/v1/initialize 拉取。
+
+  已逐字节核实的事实（v2.0.0 修正了 v1.2.0 的错误结论）：
+    · 语言包 100% 内置：app.asar 里两套资源一一对应，各 64 种语言 ——
+      原生菜单 native-menu-locales/<locale>.json（zh-CN 共 196 键）与
+      前端 chunk webview/assets/<locale>-<hash>.js（zh-CN 1,394,280 字节 / 面板显示 1.3 MB）。
+      本地相对路径动态 import，从来不需要下载，与代理也无关。
+    · 「菜单栏是中文」不等于「界面汉化生效」：原生菜单跟随系统语言，界面文字才受
+      enable_i18n 控制 —— 所以会出现「菜单展开是中文、界面全是英文」这种怪象。
+    · enable_i18n 在服务端是【无条件下发】(rule_id = default，与账号、设备、百分比
+      抽签都无关)。换句话说：应用只要能成功访问上面那个域名一次，界面就会变中文；
+      结果落盘缓存后长期有效，之后离线也没关系。
+    · 但 ab.chatgpt.com 在中国大陆被 DNS 污染 + TCP 超时（本机实测直连必超时），
+      而事件上报用的 api.oaistatsig.com 并没有被墙 —— 于是出现「应用看着能上网、
+      开关却永远 false」。唯一解法：让应用能走到 ab.chatgpt.com
+      （系统代理 / TUN / 全局模式，且代理规则要覆盖该域名），然后重启应用。
+    · 关 DNS / 搬运 LevelDB 缓存【不能】解决这个问题：缓存键
+      statsig.cached.evaluations.<hash> 的 hash 由登录身份(uid + cids)算出，
+      取值时还要校验 stableID 必须与本机一致，跨机器必然失配。
+      => v1.2.0 的「汉化加速包」已在本版删除，菜单 [7] 改为「远程开关自检与修复」。
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('menu', 'check', 'apply', 'restore', 'languages', 'clean', 'net', 'launch', 'report')]
+    [ValidateSet('menu', 'check', 'apply', 'restore', 'languages', 'clean', 'net', 'launch', 'report', 'switch', 'diag')]
     [string]$Action = 'menu',
     [string]$Language = '',
     [switch]$Yes
@@ -32,7 +57,7 @@ if ($PSScriptRoot) { $script:Root = $PSScriptRoot }
 else { $script:Root = Split-Path -Parent $MyInvocation.MyCommand.Definition }
 
 $script:AppName   = '睡醒的夜猫子 · Codex 一键汉化'
-$script:Version   = 'v1.1.0'
+$script:Version   = 'v2.0.0'
 $script:CfgPath   = Join-Path $env:USERPROFILE '.wakecat-i18n.json'
 $script:CodexHome = Join-Path $env:USERPROFILE '.codex'
 $script:ConfigToml = Join-Path $script:CodexHome 'config.toml'
@@ -41,6 +66,20 @@ $script:BackupDir    = Join-Path $script:Root 'backups'
 $script:BackupDirAlt = Join-Path $env:LOCALAPPDATA 'Codex-i18n\backups'
 $script:State     = @{}
 $script:Probe     = $null
+$script:SwitchState = $null
+$script:Verdict     = $null
+$script:TcpProbe    = $null
+
+# 条件二取证用常量：应用内置的 Statsig 客户端 key（客户端 key，非机密）与汉化开关的 Layer ID
+$script:StatsigKey   = 'client-sYWqzCYMRkUg4DqqiZcR5DGTNl2iD7zNJY0HoeDLzxR'
+$script:StatsigLayer = '72216192'
+$script:StatsigUrl   = 'https://ab.chatgpt.com/v1/initialize?k=client-sYWqzCYMRkUg4DqqiZcR5DGTNl2iD7zNJY0HoeDLzxR'
+
+# PowerShell 5.1 / .NET 4.x 默认可能只协商 TLS 1.0，直连 Cloudflare 会握手失败
+try {
+    [System.Net.ServicePointManager]::SecurityProtocol =
+        [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
+} catch { }
 
 # 旧版第三方汉化包留下的副产物
 $script:Leftovers = @(
@@ -197,6 +236,372 @@ function Move-ToRecycleBin([string]$path) {
     return (-not (Test-Path -LiteralPath $path))
 }
 
+# ------------------------------------------------- 语言开关 (Statsig enable_i18n)
+# 界面语言 = config.toml 的 localeOverride  AND  应用远程开关 enable_i18n。
+# 后者由应用启动时向 https://ab.chatgpt.com/v1/initialize 拉取（服务端无条件 true），
+# 结果缓存进应用自己的 Local Storage(LevelDB)。
+# 这套函数负责：定位缓存（软信号）、读系统代理、实测开关能否取到、以及分步修复引导。
+
+function Read-FileBytes([string]$path) {
+    # 应用运行时 LevelDB 的部分文件（MANIFEST / .log）被独占打开，
+    # ReadAllBytes 会直接抛异常；换成 FileShare.ReadWrite 打开就能读到。
+    # 读不到时返回 $null。
+    try { return [System.IO.File]::ReadAllBytes($path) } catch { }
+    try {
+        $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $len = $fs.Length
+            if ($len -le 0) { return $null }
+            $buf = New-Object byte[] ([int]$len)
+            $read = 0
+            while ($read -lt $buf.Length) {
+                $n = $fs.Read($buf, $read, $buf.Length - $read)
+                if ($n -le 0) { break }
+                $read += $n
+            }
+            return $buf
+        } finally { $fs.Close() }
+    } catch { return $null }
+}
+
+function Copy-FileTree {
+    # MSIX 商店版应用的数据文件普遍带 EFS 加密属性（FILE_ATTRIBUTE_ENCRYPTED），
+    # 用 Copy-Item 复制会报 "The specified file could not be encrypted."(Win32 6000)。
+    # robocopy 不走加密语义，复制正常，所以这里一律走 robocopy。
+    # 返回 $true 表示成功（robocopy 退出码 0-7 均视为成功）。
+    param([string]$Source, [string]$Dest, [string]$Exclude = 'LOCK', [switch]$Mirror)
+    if (-not (Test-Path -LiteralPath $Dest)) { New-Item -ItemType Directory -Path $Dest -Force | Out-Null }
+    $rb = Join-Path $env:SystemRoot 'System32\robocopy.exe'
+    if (Test-Path -LiteralPath $rb) {
+        $rbArgs = @($Source, $Dest)
+        if ($Mirror) { $rbArgs += '/MIR' } else { $rbArgs += '/E' }
+        if ($Exclude) { $rbArgs += '/XF'; $rbArgs += $Exclude }
+        $rbArgs += @('/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/R:1', '/W:1')
+        & $rb @rbArgs | Out-Null
+        if ($LASTEXITCODE -lt 8) { return $true }
+        return $false
+    }
+    # 极端情况下没有 robocopy：退回 Copy-Item（未加密的文件仍可用）
+    try {
+        foreach ($it in @(Get-ChildItem -LiteralPath $Source -Force -ErrorAction Stop)) {
+            if ($Exclude -and $it.Name -eq $Exclude) { continue }
+            Copy-Item -LiteralPath $it.FullName -Destination $Dest -Force -Recurse -ErrorAction Stop
+        }
+        return $true
+    } catch { return $false }
+}
+
+function Clear-EfsAttribute([string]$Dir) {
+    # 兜底：万一目标目录继承了加密属性，用系统自带 cipher 解掉，
+    # 保证加速包能被别的电脑 / 别的账户读取。返回 $true 表示目录内已无加密文件。
+    $enc = @(Get-ChildItem -LiteralPath $Dir -File -Force -ErrorAction SilentlyContinue |
+             Where-Object { $_.Attributes -band [System.IO.FileAttributes]::Encrypted })
+    if ($enc.Count -eq 0) { return $true }
+    $ci = Join-Path $env:SystemRoot 'System32\cipher.exe'
+    if (Test-Path -LiteralPath $ci) {
+        & $ci /d /s:$Dir | Out-Null
+        $enc = @(Get-ChildItem -LiteralPath $Dir -File -Force -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Attributes -band [System.IO.FileAttributes]::Encrypted })
+    }
+    return ($enc.Count -eq 0)
+}
+
+function Copy-FileTreePlain {
+    # 导出专用：以「读出明文 -> 写新文件」的方式复制。
+    # 源文件带 EFS 加密属性时，robocopy 会把加密属性一并带过去，
+    # 这样的包换台电脑 / 换个账户就打不开，所以必须走读写复制得到明文。
+    # 返回成功复制的文件数，-1 表示失败。
+    param([string]$Source, [string]$Dest, [string]$Exclude = 'LOCK')
+    if (-not (Test-Path -LiteralPath $Dest)) { New-Item -ItemType Directory -Path $Dest -Force | Out-Null }
+    $n = 0
+    foreach ($f in @(Get-ChildItem -LiteralPath $Source -File -Force -ErrorAction SilentlyContinue)) {
+        if ($Exclude -and $f.Name -eq $Exclude) { continue }
+        try {
+            $bytes = Read-FileBytes $f.FullName
+            if ($null -eq $bytes) { return -1 }
+            [System.IO.File]::WriteAllBytes((Join-Path $Dest $f.Name), $bytes)
+            $n++
+        } catch { return -1 }
+    }
+    $n
+}
+
+function Get-WebProfileRoots {
+    # Electron 用户数据根目录候选。MSIX 商店版会被虚拟化到 Packages\<PFN>\LocalCache\Roaming 下。
+    $out = New-Object System.Collections.Generic.List[string]
+    $appNames = @('Codex', 'ChatGPT', 'OpenAI Codex', 'OpenAI')
+    try {
+        foreach ($pk in @(Get-AppxPackage -ErrorAction SilentlyContinue |
+                          Where-Object { $_.Name -like 'OpenAI.*' -or $_.Name -like '*Codex*' -or $_.Name -like '*ChatGPT*' })) {
+            foreach ($an in $appNames) {
+                $out.Add((Join-Path $env:LOCALAPPDATA ('Packages\' + $pk.PackageFamilyName + '\LocalCache\Roaming\' + $an)))
+            }
+        }
+    } catch { }
+    foreach ($an in $appNames) { $out.Add((Join-Path $env:APPDATA $an)) }
+    @($out | Select-Object -Unique | Where-Object { $_ -and (Test-Path -LiteralPath $_) })
+}
+
+function Find-ProfileRoot {
+    # 返回真正存放 web profile 的那一层（…\<App>\web\<profile>）
+    foreach ($root in Get-WebProfileRoots) {
+        $web = Join-Path $root 'web'
+        if (-not (Test-Path -LiteralPath $web)) { continue }
+        foreach ($prof in @(Get-ChildItem -LiteralPath $web -Directory -Force -ErrorAction SilentlyContinue)) {
+            if (Test-Path -LiteralPath (Join-Path $prof.FullName 'Default\Local Storage')) {
+                return $prof.FullName
+            }
+        }
+    }
+    $null
+}
+
+function Get-StorageLevelDb([string]$profileRoot) {
+    if ($profileRoot) {
+        $p = Join-Path $profileRoot 'Default\Local Storage\leveldb'
+        if (Test-Path -LiteralPath $p) { return $p }
+    }
+    $pr = Find-ProfileRoot
+    if ($pr) { return (Join-Path $pr 'Default\Local Storage\leveldb') }
+    $null
+}
+
+# ---------------------------------------------------------------- 条件二：远程开关
+function Get-SystemProxy {
+    # 读取 Windows 系统代理（WinINET）。应用是 Electron/Chromium，网络栈走的就是它。
+    $r = [ordered]@{ Enabled = $false; Server = ''; AutoConfig = ''; Uri = ''; Note = '' }
+    try {
+        $k = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
+        $pe = $null; $sv = ''; $ac = ''
+        if ($k.PSObject.Properties['ProxyEnable']) { $pe = $k.ProxyEnable }
+        if ($k.PSObject.Properties['ProxyServer']) { $sv = "$($k.ProxyServer)" }
+        if ($k.PSObject.Properties['AutoConfigURL']) { $ac = "$($k.AutoConfigURL)" }
+        if ($null -ne $pe -and [int]$pe -eq 1 -and $sv) { $r.Enabled = $true; $r.Server = $sv }
+        if ($ac) { $r.AutoConfig = $ac }
+    } catch { $r.Note = "读取系统代理设置失败：$($_.Exception.Message)" }
+
+    if ($r.Server) {
+        $https = ''; $plain = ''
+        foreach ($part in ($r.Server -split ';')) {
+            $p2 = "$part".Trim()
+            if ($p2 -match '^https\s*=\s*(.+)$') { $https = $Matches[1].Trim() }
+            elseif ($p2 -match '^http\s*=\s*(.+)$') { $plain = $Matches[1].Trim() }
+            elseif ($p2 -and $p2 -notmatch '=') { $plain = $p2 }
+        }
+        $pick = if ($https) { $https } else { $plain }
+        if ($pick) {
+            if ($pick -notmatch '://') { $pick = 'http://' + $pick }
+            $r.Uri = $pick
+        }
+    }
+    [pscustomobject]$r
+}
+
+function Test-Tcp443 {
+    # 快速 TCP 探测：判断某个域名在「直连」情况下通不通（不走代理）
+    param([string]$HostName, [int]$TimeoutMs = 3000)
+    $c = $null
+    try {
+        $c = New-Object System.Net.Sockets.TcpClient
+        $iar = $c.BeginConnect($HostName, 443, $null, $null)
+        if (-not $iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) { return '超时' }
+        $c.EndConnect($iar)
+        return '可达'
+    } catch { return '失败' }
+    finally { if ($c) { try { $c.Close() } catch { } } }
+}
+
+function Invoke-StatsigProbe {
+    # 直接向应用默认的 initialize 端点发一次同样的请求，读回 enable_i18n 的真实取值。
+    # 该端点的这一层在服务端是 rule_id=default（无条件下发），所以用一个随机探针账号
+    # 取到的结果，与本机应用取到的结果一致。
+    param([string]$ProxyUri = '', [int]$TimeoutMs = 15000, [int]$Retries = 3)
+    # 注意：实测这条链路会偶发 "connection was closed on send"（TLS/代理在首包握手上抽风）。
+    # 单次失败不代表拿不到开关 —— 必须重试，否则会把「代理其实是好的」误报成「代理没配好」。
+    $body = '{"user":{"userID":"wakecat-probe"},"statsigMetadata":{"sdkName":"js-client","sdkVersion":"3.33.4"},"sinceTime":0,"hash":"djb2"}'
+    if ($Retries -lt 1) { $Retries = 1 }
+    $lastErr = ''
+    for ($attempt = 1; $attempt -le $Retries; $attempt++) {
+        if ($attempt -gt 1) { Start-Sleep -Milliseconds 700 }
+        try {
+            $req = [System.Net.HttpWebRequest]::Create($script:StatsigUrl)
+            $req.Method = 'POST'
+            $req.ContentType = 'application/json'
+            $req.UserAgent = 'Mozilla/5.0'
+            $req.Timeout = $TimeoutMs
+            $req.ReadWriteTimeout = $TimeoutMs
+            if ($ProxyUri) { $req.Proxy = New-Object System.Net.WebProxy($ProxyUri) }
+            else { $req.Proxy = New-Object System.Net.WebProxy }   # 空地址 = 强制直连，忽略系统代理
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+            $req.ContentLength = $bytes.Length
+            $rs = $req.GetRequestStream()
+            $rs.Write($bytes, 0, $bytes.Length)
+            $rs.Close()
+            $resp = $req.GetResponse()
+            $sr = New-Object System.IO.StreamReader($resp.GetResponseStream(), [System.Text.Encoding]::UTF8)
+            $text = $sr.ReadToEnd()
+            $sr.Close(); $resp.Close()
+
+            $enable = $null
+            $i = $text.IndexOf('"enable_i18n"')
+            if ($i -ge 0) {
+                $len = [Math]::Min(200, $text.Length - $i)
+                $m = [regex]::Match($text.Substring($i, $len), '"enable_i18n"\s*:\s*(true|false)')
+                if ($m.Success) { $enable = ($m.Groups[1].Value -eq 'true') }
+            }
+            return [pscustomobject]@{ Ok = $true; Enable = $enable; Bytes = $text.Length; Error = ''; Attempts = $attempt }
+        } catch {
+            $lastErr = $_.Exception.Message
+            # 内侧异常里更有用的那条（"send"/"receive" 之类）常常是 InnerException
+            if ($_.Exception.InnerException) { $lastErr = $_.Exception.InnerException.Message }
+        }
+    }
+    [pscustomobject]@{ Ok = $false; Enable = $null; Bytes = 0; Error = $lastErr; Attempts = $Retries }
+}
+
+function Get-SwitchVerdict {
+    # 权威判定：应用到底能不能拿到 enable_i18n。
+    # 应用走的是系统代理（跟浏览器一样）；所以我们优先按系统代理去测。
+    param([switch]$Refresh, [int]$TimeoutMs = 15000)
+    if (-not $Refresh -and $script:Verdict) { return $script:Verdict }
+
+    $cfg = Get-Cfg
+    $sp = Get-SystemProxy
+    $manual = ''
+    if ($cfg.proxy) { $manual = "$($cfg.proxy)".Trim() }
+
+    $r = [ordered]@{
+        SysProxy = $sp; Manual = $manual; Primary = ''; PrimaryOk = $false; Enable = $null
+        Error = ''; Alt = ''; AltOk = $false; AltEnable = $null; Tested = $false
+        Attempts = 0
+    }
+
+    if ($sp.Enabled -and $sp.Uri) { $r.Primary = "系统代理 $($sp.Uri)"; $px = $sp.Uri }
+    else { $r.Primary = '直连（未开启系统代理）'; $px = '' }
+
+    $res = Invoke-StatsigProbe -ProxyUri $px -TimeoutMs $TimeoutMs
+    $r.Tested = $true
+    $r.Attempts = $res.Attempts
+    if ($res.Ok) { $r.PrimaryOk = $true; $r.Enable = $res.Enable } else { $r.Error = $res.Error }
+
+    # 对照一组：用来区分「代理没配好」还是「域名被墙」
+    if ($px) { $am = '直连'; $ax = '' }
+    elseif ($manual) { $am = "本工具代理 $manual"; $ax = $manual }
+    else { $am = ''; $ax = '' }
+    if ($am) {
+        $ra = Invoke-StatsigProbe -ProxyUri $ax -TimeoutMs $TimeoutMs
+        $r.Alt = $am
+        $r.AltOk = $ra.Ok
+        $r.AltEnable = $ra.Enable
+    }
+
+    $script:Verdict = [pscustomobject]$r
+    $script:Verdict
+}
+
+function Show-SwitchVerdict {
+    # 把判定结果翻译成一句人话 + 下一步动作
+    param($Vd, [switch]$Brief)
+    if (-not $Vd -or -not $Vd.Tested) {
+        Write-C '        尚未检测。进入菜单 [7] 做一次远程开关自检。' 'DarkGray'
+        return
+    }
+    if ($Vd.PrimaryOk -and $Vd.Enable -eq $true) {
+        Write-C "        [OK] 通过 $($Vd.Primary) 取到开关：enable_i18n = true" 'Green'
+        if ($Vd.Attempts -gt 1) {
+            Write-C "             （链路有点抖，自动重试到第 $($Vd.Attempts) 次才成功 —— 结果仍然有效）" 'DarkGray'
+        }
+        Write-C '             条件二满足。若界面还是英文，完全退出应用（托盘图标右键 -> 退出）' 'Gray'
+        Write-C '             再重新打开即可；已经中文的机器不用再管。' 'Gray'
+        return
+    }
+    if ($Vd.PrimaryOk -and $Vd.Enable -ne $true) {
+        Write-C "        [!] 请求成功，但 enable_i18n = $($Vd.Enable)（预期 true）" 'Red'
+        Write-C '             这通常说明请求打到的是被劫持/缓存污染的响应，请检查代理是否做了' 'Gray'
+        Write-C '             中间人替换，或换个代理节点再试。' 'Gray'
+        return
+    }
+    Write-C "        [X] 拿不到开关：$($Vd.Primary) 请求失败（已自动重试 $($Vd.Attempts) 次）" 'Red'
+    if ($Vd.Error) { Write-C "            原因：$($Vd.Error)" 'DarkGray' }
+    if ($Vd.Alt) {
+        if ($Vd.AltOk) {
+            Write-C "            但换成「$($Vd.Alt)」是可以拿到配置的 —— 说明域名没问题，" 'Yellow'
+            Write-C '            是应用要走的这条路（系统代理）没生效。' 'Yellow'
+        } else {
+            Write-C "            （对照：$($Vd.Alt) 同样失败）" 'DarkGray'
+        }
+    } elseif (-not $Vd.SysProxy.Enabled) {
+        Write-C '            对照：当前直连也失败，且系统代理没开 —— 这就是根因。' 'Yellow'
+    }
+    if (-not $Brief) {
+        Write-Host ''
+        Write-C '        ---- 修复步骤（照做即可） ----' 'Cyan'
+        Write-C '        1) 打开你的代理软件，开启「系统代理」或「TUN 模式」，' 'White'
+        Write-C '           不要只开浏览器插件/只给某个 App 走代理。' 'White'
+        Write-C '        2) 确认代理规则里 ab.chatgpt.com 是走代理的。' 'White'
+        Write-C '           很多订阅只写了 chatgpt.com / openai.com，漏掉这个域名，' 'Gray'
+        Write-C '           结果就是「应用能登录、就是拿不到汉化开关」。' 'Gray'
+        Write-C '           最省事的做法：切到全局（Global）模式跑一次。' 'Gray'
+        Write-C '        3) 完全退出 Codex（托盘图标右键 -> 退出，关窗口不算），再重新打开。' 'White'
+        Write-C '        4) 等 10~15 秒，界面会自己切成中文（只需成功一次，之后离线也有效）。' 'White'
+        Write-C '        5) 回到本工具点 [R] 刷新面板，或再做一次 [7] 复测。' 'White'
+    }
+}
+
+function Get-SwitchState {
+    param([switch]$Refresh)
+    if (-not $Refresh -and $script:SwitchState) { return $script:SwitchState }
+
+    $r = [ordered]@{
+        ProfileRoot = ''; LevelDb = ''; Exists = $false; Size = [int64]0; Stamp = $null
+        Cache = $false; CacheFlag = ''; StableId = $false; Session = $false; Error = ''
+        SysProxy = (Get-SystemProxy)
+    }
+    $pr = Find-ProfileRoot
+    if ($pr) { $r.ProfileRoot = $pr }
+    $lp = Get-StorageLevelDb $pr
+    if (-not $lp) {
+        $r.Error = '未找到应用本地存储目录（应用从未启动过时属正常）'
+        $script:SwitchState = [pscustomobject]$r
+        return $script:SwitchState
+    }
+    $r.LevelDb = $lp
+    $r.Exists = $true
+    $files = @(Get-ChildItem -LiteralPath $lp -File -Force -ErrorAction SilentlyContinue)
+    $sum = ($files | Measure-Object -Property Length -Sum).Sum
+    if ($null -ne $sum) { $r.Size = [int64]$sum }
+    $newest = $files | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($newest) { $r.Stamp = $newest.LastWriteTime }
+
+    # 注意两件事：
+    #   1) localStorage 的值在 LevelDB 里以 UTF-16LE 存放（v1.2.0 的 ASCII 扫描因此全部漏报）；
+    #   2) 历史数据会被 snappy 压缩进 .ldb，纯文本扫不到。
+    # 所以这里只扫未压缩的 .log（最近写入）做「软信号」，权威判定看 Get-SwitchVerdict 的联网实测。
+    $keys = @('statsig.cached.evaluations', 'statsig.stable_id', 'statsig.session_id')
+    foreach ($f in $files) {
+        if ($f.Length -le 0 -or $f.Length -gt 64MB) { continue }
+        $b = Read-FileBytes $f.FullName
+        if ($null -eq $b) { continue }
+        $u = [System.Text.Encoding]::Unicode.GetString($b)
+        $a = [System.Text.Encoding]::ASCII.GetString($b)
+        foreach ($k in $keys) {
+            if ($u.Contains($k) -or $a.Contains($k)) {
+                if ($k -eq 'statsig.cached.evaluations') { $r.Cache = $true }
+                elseif ($k -eq 'statsig.stable_id') { $r.StableId = $true }
+                else { $r.Session = $true }
+            }
+        }
+        if ($u.Contains('"enable_i18n":true') -or $a.Contains('"enable_i18n":true') -or $u.Contains('"enable_i18n": true')) { $r.CacheFlag = 'true' }
+        elseif ($u.Contains('"enable_i18n":false') -or $a.Contains('"enable_i18n":false') -or $u.Contains('"enable_i18n": false')) { $r.CacheFlag = 'false' }
+    }
+    $script:SwitchState = [pscustomobject]$r
+    $script:SwitchState
+}
+
+function Test-AppRunning {
+    @(Get-Process -Name 'ChatGPT', 'Codex', 'codex' -ErrorAction SilentlyContinue).Count -gt 0
+}
+
 # ---------------------------------------------------------------- 定位应用
 function Find-App {
     $cfg = Get-Cfg
@@ -322,6 +727,20 @@ function Get-AppProbe {
     if ($app.Package) {
         $r.Version = "$($app.Package.Version)"
         $r.FamilyName = $app.Package.PackageFamilyName
+    }
+    # 由「运行中的进程」定位到应用时没有包信息，按安装路径反查一次包；
+    # 否则会退到 exe 的 ProductVersion —— 那是 Electron/Chromium 的版本号（如 152.x），容易误导。
+    if (-not $r.Version) {
+        try {
+            $hit = @(Get-AppxPackage -ErrorAction SilentlyContinue |
+                     Where-Object { $_.InstallLocation -and $app.Path.StartsWith($_.InstallLocation, [System.StringComparison]::OrdinalIgnoreCase) } |
+                     Select-Object -First 1)
+            if ($hit.Count -gt 0) {
+                $r.Version = "$($hit[0].Version)"
+                $r.FamilyName = $hit[0].PackageFamilyName
+                $r.Kind = 'MSIX'
+            }
+        } catch { }
     }
     if (-not $r.Version) {
         $exe = @('ChatGPT.exe', 'Codex.exe') | ForEach-Object { Join-Path $app.Path $_ } |
@@ -580,7 +999,7 @@ function Get-PanelRows {
             $rows.Add(@('中文资源', '未检测到 native-menu-locales', 'Red'))
         }
     } else {
-        $rows.Add(@('应用', '未找到 (菜单 [7] 可手动指定路径)', 'Red'))
+        $rows.Add(@('应用', '未找到 (菜单 [9] 可手动指定路径)', 'Red'))
     }
 
     if ($toml) {
@@ -609,8 +1028,37 @@ function Get-PanelRows {
         $rows.Add(@('副产物', '无', 'Green'))
     }
 
-    if ($cfg.proxy) { $rows.Add(@('网络代理', $cfg.proxy, 'Gray')) }
-    else { $rows.Add(@('网络代理', '未设置（直连）', 'DarkGray')) }
+    # 系统代理 —— 应用的 Electron 网络栈走的就是它，条件二成败与否基本取决于这里
+    $sp = Get-SystemProxy
+    if ($sp.Enabled -and $sp.Uri) {
+        $rows.Add(@('系统代理', "已开启 $($sp.Uri)   (应用走的就是它)", 'Green'))
+    } elseif ($sp.AutoConfig) {
+        $rows.Add(@('系统代理', "PAC 自动配置 $($sp.AutoConfig)", 'Gray'))
+    } elseif ($sp.Note) {
+        $rows.Add(@('系统代理', $sp.Note, 'Yellow'))
+    } else {
+        $rows.Add(@('系统代理', '未开启  <- 应用拉汉化开关要靠它', 'Yellow'))
+    }
+
+    if ($script:Verdict -and $script:Verdict.Tested) {
+        $vd = $script:Verdict
+        if ($vd.PrimaryOk -and $vd.Enable -eq $true) {
+            $rows.Add(@('语言开关', "enable_i18n = true  ($($vd.Primary)) · 中文可用", 'Green'))
+        } elseif ($vd.PrimaryOk) {
+            $rows.Add(@('语言开关', "enable_i18n = $($vd.Enable)  ($($vd.Primary))  -> [7]", 'Red'))
+        } else {
+            $rows.Add(@('语言开关', "拉取失败（$($vd.Primary)）  -> 菜单 [7] 修复", 'Red'))
+        }
+    } else {
+        # 面板每次重绘都联网太慢，这里只做一次几毫秒级的 TCP 探测，权威判定在菜单 [7]
+        if (-not $script:TcpProbe) { $script:TcpProbe = Test-Tcp443 -HostName 'ab.chatgpt.com' -TimeoutMs 2500 }
+        $tk = $script:TcpProbe
+        $col = if ($tk -eq '可达') { 'Green' } elseif ($sp.Enabled -and $sp.Uri) { 'Gray' } else { 'Yellow' }
+        $note = if ($sp.Enabled -and $sp.Uri) { '(直连被墙属正常，走代理即可)' } else { '<- 关键域名，直连被墙' }
+        $rows.Add(@('汉化开关', "ab.chatgpt.com 直连 $tk  $note", $col))
+    }
+
+    if ($cfg.proxy) { $rows.Add(@('本工具代理', $cfg.proxy, 'DarkGray')) }
 
     $rows.Add(@('配置', $script:CfgPath, 'DarkGray'))
     $rows
@@ -652,15 +1100,25 @@ function Resolve-Language([string]$want) {
     if ($p.Locales.Count -gt 0 -and ($p.Locales -contains $want)) { return $want }
     $alias = @{
         'zh' = 'zh-CN'; 'cn' = 'zh-CN'; 'zh-cn' = 'zh-CN'; '简体' = 'zh-CN'; '中文' = 'zh-CN'
-        'zh-tw' = 'zh-TW'; 'zh-hk' = 'zh-HK'; 'en' = 'en-US'; 'ja' = 'ja-JP'; 'ko' = 'ko-KR'
+        'zh-tw' = 'zh-TW'; 'zh-hk' = 'zh-HK'; 'ja' = 'ja-JP'; 'ko' = 'ko-KR'
     }
+    # 英文是应用的内建回退语言，包内并没有 en-US.json。
+    # 写 en-US 也能回退成英文，但正确做法是直接摘掉 localeOverride（走 [4] 还原逻辑）。
+    if ($want -match '^(en|en-us|en-gb|english|英文|英语)$') { return '' }
     if ($alias.ContainsKey($want.ToLower())) { return $alias[$want.ToLower()] }
     $want
 }
 
 function Invoke-Apply([string]$locale) {
     $p = Get-AppProbe -Refresh
-    if (-not $p.Found) { Write-C '  [X] 未找到 ChatGPT / Codex 桌面版，请用菜单 [7] 手动指定安装路径。' 'Red'; return }
+    if (-not $p.Found) { Write-C '  [X] 未找到 ChatGPT / Codex 桌面版，请用菜单 [9] 手动指定安装路径。' 'Red'; return }
+    # 目标语言解析成空 = 用户要的是英文，交给还原逻辑
+    if (-not $locale -or $locale -eq 'en-US') { Invoke-Restore; return }
+    if ($p.Locales.Count -gt 0 -and ($p.Locales -notcontains $locale)) {
+        Write-C "  [X] 该应用不提供语言 `"$locale`"。" 'Red'
+        Write-C "      可用语言：$($p.Locales -join ', ')" 'Gray'
+        return
+    }
 
     Write-Host ''
     Write-C '  [1/4] 读取官方语言资源…' 'Cyan'
@@ -697,9 +1155,27 @@ function Invoke-Apply([string]$locale) {
     }
 
     Write-Host ''
-    Write-C '  汉化设置已就绪。界面语言由应用官方开关控制，' 'Green'
-    Write-C '  完全离线完成，不需要 VPN，且应用商店升级后依然有效。' 'Green'
-    Write-C '  若界面仍是英文：完全退出应用（托盘右键退出）后重新启动即可。' 'Gray'
+    Write-C '  条件一（localeOverride）已完成。' 'Green'
+    Write-C '  界面语言由应用官方开关控制，应用商店升级后依然有效。' 'Green'
+
+    Write-Host ''
+    Write-C '  [校验] 条件二：远程开关 enable_i18n' 'Cyan'
+    Write-C '        语言包本身 100% 内置；界面到底切不切中文，取决于应用能不能' 'Gray'
+    Write-C '        从 https://ab.chatgpt.com/v1/initialize 把开关拿下来一次。' 'Gray'
+    Write-Host ''
+    $vd = Get-SwitchVerdict -Refresh -TimeoutMs 12000
+    Show-SwitchVerdict $vd -Brief
+    $sw = Get-SwitchState -Refresh
+    Write-Host ''
+    if ($sw.Exists) {
+        Write-C ("        应用本地存储：$($sw.LevelDb)") 'DarkGray'
+    } else {
+        Write-C ("        $($sw.Error)") 'DarkGray'
+    }
+    Write-Host ''
+    Write-C '  若条件二也通过了、界面仍是英文：完全退出应用（托盘图标右键 -> 退出）后重启即可。' 'Gray'
+    Write-C '  若条件二没通过：进入菜单 [7] 远程开关自检与修复，里面有分步操作。' 'Yellow'
+    Write-C '  （v1.2.0 的「汉化加速包」已删除：缓存键绑登录身份，跨机器搬运必然失效。）' 'DarkGray'
 }
 
 function Invoke-Check {
@@ -748,6 +1224,33 @@ function Invoke-Check {
     }
 
     Write-Host ''
+    Write-C '  界面语言开关（条件二）：' 'Cyan'
+    $sp = Get-SystemProxy
+    if ($sp.Enabled -and $sp.Uri) {
+        Write-C ("    系统代理        : 已开启 $($sp.Uri)") 'Green'
+    } elseif ($sp.AutoConfig) {
+        Write-C ("    系统代理        : PAC $($sp.AutoConfig)") 'Gray'
+    } else {
+        Write-C '    系统代理        : 未开启  <- 应用要靠它才能拿到开关' 'Yellow'
+    }
+    $tk = Test-Tcp443 -HostName 'ab.chatgpt.com' -TimeoutMs 4000
+    Write-C ("    关键域名直连    : ab.chatgpt.com [$tk]   (该域名国内直连必超时，属正常)") 'Gray'
+    Write-Host ''
+    $vd = Get-SwitchVerdict -Refresh -TimeoutMs 12000
+    Write-C ("    实测路径        : " + $vd.Primary) 'Gray'
+    Show-SwitchVerdict $vd
+    $sw = Get-SwitchState -Refresh
+    if ($sw.Exists) {
+        Write-C ("    本地存储        : " + $sw.LevelDb) 'DarkGray'
+        $stampTxt = if ($sw.Stamp) { $sw.Stamp.ToString('yyyy-MM-dd HH:mm:ss') } else { '?' }
+        Write-C ("    体积 / 更新时间 : " + (Fmt-Size $sw.Size) + "  ·  " + $stampTxt) 'Gray'
+        $flagTxt = if ($sw.CacheFlag) { "读到取值 $($sw.CacheFlag)" } elseif ($sw.Cache) { '有缓存条目（取值未读到）' } else { '未在未压缩日志里读到' }
+        Write-C ("    缓存里的开关    : " + $flagTxt + "   (软信号，权威判定看上面的实测)") 'DarkGray'
+    } else {
+        Write-C ("    " + $(if ($sw.Error) { $sw.Error } else { '未找到' })) 'Gray'
+    }
+
+    Write-Host ''
     Write-C '  副产物占用：' 'Cyan'
     $any = $false
     foreach ($it in $script:Leftovers) {
@@ -763,12 +1266,19 @@ function Invoke-Check {
     Write-C '  结论：' 'Cyan'
     if ($p.Found -and $p.ZhKeys -gt 0) {
         if ($toml -like 'zh*') {
-            Write-C "    [OK] 官方中文资源完整，localeOverride = `"$toml`"，界面应为中文。" 'Green'
+            Write-C "    [OK] 条件一：官方中文资源完整，localeOverride = `"$toml`"。" 'Green'
         } else {
-            Write-C '    [!] 中文资源完整，但 localeOverride 未指向中文，请执行 [1] 一键汉化。' 'Yellow'
+            Write-C '    [!] 条件一：中文资源完整，但 localeOverride 未指向中文，请执行 [1] 一键汉化。' 'Yellow'
         }
     } elseif ($p.Found) {
-        Write-C '    [!] 未检测到内置中文资源，该版本可能不提供简体中文。' 'Yellow'
+        Write-C '    [!] 条件一：未检测到内置中文资源，该版本可能不提供简体中文。' 'Yellow'
+    }
+    if ($vd.Tested -and $vd.PrimaryOk -and $vd.Enable -eq $true) {
+        Write-C '    [OK] 条件二：实测 enable_i18n = true，应用下次启动就能拿到中文界面。' 'Green'
+    } else {
+        Write-C '    [!] 条件二：实测拿不到 enable_i18n。语言包是内置的，但这个开关必须由应用' 'Yellow'
+        Write-C '        联网向 ab.chatgpt.com 拉一次 —— 该域名在国内被墙，开系统代理/TUN 并' 'Yellow'
+        Write-C '        确保代理规则覆盖它即可。菜单 [7] 有分步操作。' 'Yellow'
     }
     Write-C '    旧版第三方汉化包（复制 app.asar 到用户目录那套）在此版本上属于负优化，不建议使用。' 'DarkGray'
 }
@@ -828,6 +1338,127 @@ function Invoke-Restore {
     Write-C '  设置类改动已撤销。应用本身从未被修改，无需更深入还原。' 'Gray'
 }
 
+# ---------------------------------------------------------------- 远程开关自检与修复
+function Invoke-SwitchFix {
+    param([switch]$NoPrompt)
+    while ($true) {
+        Write-Host ''
+        Write-C '  === 远程开关自检与修复（条件二）=============================' 'Cyan'
+        Write-C '  界面语言由两个条件共同决定：' 'Gray'
+        Write-C '    条件一 localeOverride        —— 本工具负责，纯本地即可完成（菜单 [1]）' 'Gray'
+        Write-C '    条件二 远程开关 enable_i18n  —— 应用启动时向 ab.chatgpt.com 拉取' 'Gray'
+        Write-Host ''
+        Write-C '  关键事实：这个开关在服务端是【无条件下发】的（rule_id = default），' 'White'
+        Write-C '  跟账号、设备、抽签百分比都无关 —— 也就是说，应用只要能成功访问' 'White'
+        Write-C '  ab.chatgpt.com 一次，界面就会变中文，之后离线也长期有效。' 'White'
+        Write-C '  而该域名在国内被 DNS 污染 + TCP 超时，于是出现「应用能登录、界面却永远英文」。' 'Yellow'
+        Write-Host ''
+        Write-C '  ---- 实测 ----' 'Cyan'
+
+        $sp = Get-SystemProxy
+        if ($sp.Enabled -and $sp.Uri) { Write-C ("    · 系统代理                : 已开启 $($sp.Uri)") 'Green' }
+        elseif ($sp.AutoConfig) { Write-C ("    · 系统代理                : PAC $($sp.AutoConfig)") 'Gray' }
+        else { Write-C '    · 系统代理                : 未开启' 'Yellow' }
+        $d1 = Test-Tcp443 -HostName 'ab.chatgpt.com' -TimeoutMs 5000
+        $d2 = Test-Tcp443 -HostName 'api.oaistatsig.com' -TimeoutMs 5000
+        Write-C ("    · ab.chatgpt.com   直连   : $d1   <- 汉化开关就从这个域名下发") 'Gray'
+        Write-C ("    · api.oaistatsig.com 直连 : $d2   <- 事件上报用，国内通常直连通") 'DarkGray'
+
+        $vd = Get-SwitchVerdict -Refresh -TimeoutMs 15000
+        Write-C ("    · 实测路径                : $($vd.Primary)") 'Gray'
+        Show-SwitchVerdict $vd
+
+        Write-Host ''
+        Write-C '  ---- 说明 ----' 'DarkGray'
+        Write-C '    · 只需成功一次：开关结果会缓存进应用本地，之后换网络 / 断网都还是中文。' 'DarkGray'
+        Write-C '    · 「菜单栏是中文」不代表汉化成功：原生菜单跟随系统语言，' 'DarkGray'
+        Write-C '      界面文字才看 enable_i18n 这个开关 —— 这正是「菜单中文、界面英文」的由来。' 'DarkGray'
+        Write-C '    · v1.2.0 的「汉化加速包」已删除：缓存键 statsig.cached.evaluations.<hash>' 'DarkGray'
+        Write-C '      的 hash 由登录身份（uid + cids）算出，取值还要校验 stableID 必须与本机' 'DarkGray'
+        Write-C '      一致，所以跨机器搬运必然失配，跟工具写得好不好无关。' 'DarkGray'
+
+        Write-Host ''
+        Write-C '    1) 重新检测' 'White'
+        Write-C '    2) 启动 / 重启应用（让它去拉开关）' 'White'
+        Write-C '    3) 保存诊断报告到文件' 'White'
+        Write-C '    0) 返回' 'White'
+        Write-Host ''
+        if ($NoPrompt -or -not (Test-Interactive)) { return }
+        $c = "$(Read-Host '  选择')".Trim()
+        if ($c -eq '1') { $script:Verdict = $null; $script:TcpProbe = $null; continue }
+        if ($c -eq '2') {
+            Invoke-Launch
+            Write-C '  等 10~15 秒看界面是否变成中文；只需成功一次。' 'White'
+            Write-Host ''
+            Write-C '  按回车继续…' 'DarkGray'
+            [void](Read-Host)
+            continue
+        }
+        if ($c -eq '3') { Save-DiagReport; continue }
+        if ($c -eq '0') { return }
+        Write-C '  无效选择。' 'Red'
+    }
+}
+
+function Save-DiagReport {
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $path = Join-Path $script:Root ("诊断报告-$stamp.txt")
+    $L = New-Object System.Collections.Generic.List[string]
+    $L.Add('睡醒的夜猫子 · Codex 一键汉化  诊断报告')
+    $L.Add("工具版本   : $($script:Version)")
+    $L.Add("生成时间   : $((Get-Date).ToString('s'))")
+    $L.Add("计算机/用户: $env:COMPUTERNAME / $env:USERNAME")
+    $L.Add("操作系统   : $([System.Environment]::OSVersion.VersionString)")
+    $L.Add("PowerShell : $($PSVersionTable.PSVersion)")
+    $L.Add('')
+    $p = Get-AppProbe
+    $L.Add("应用已找到 : $($p.Found)")
+    if ($p.Found) {
+        $L.Add("应用版本   : $($p.Version)")
+        $L.Add("安装路径   : $($p.AppDir)")
+    }
+    $L.Add("配置目录   : $($script:CodexHome)")
+    $L.Add("localeOverride : $(Get-TomlLocale $script:ConfigToml)")
+    $L.Add('')
+    $sp = Get-SystemProxy
+    $L.Add("系统代理开关 : $($sp.Enabled)")
+    $L.Add("系统代理地址 : $($sp.Server)")
+    $L.Add("系统代理 PAC : $($sp.AutoConfig)")
+    if ($sp.Note) { $L.Add("系统代理备注 : $($sp.Note)") }
+    $L.Add('')
+    foreach ($h in @('ab.chatgpt.com', 'api.oaistatsig.com', 'statsigcdn.openai.com', 'chatgpt.com')) {
+        $L.Add("直连 TCP443 $h : $(Test-Tcp443 -HostName $h -TimeoutMs 5000)")
+    }
+    $L.Add('')
+    $vd = Get-SwitchVerdict -Refresh -TimeoutMs 15000
+    $L.Add("实测路径       : $($vd.Primary)")
+    $L.Add("实测成功       : $($vd.PrimaryOk)")
+    $L.Add("enable_i18n    : $($vd.Enable)")
+    $L.Add("尝试次数       : $($vd.Attempts)")
+    $L.Add("实测错误       : $($vd.Error)")
+    if ($vd.Alt) { $L.Add("对照 $($vd.Alt) : Ok=$($vd.AltOk) enable_i18n=$($vd.AltEnable)") }
+    $sw = Get-SwitchState -Refresh
+    $L.Add('')
+    $L.Add("本地存储目录   : $($sw.LevelDb)")
+    $L.Add("本地存储存在   : $($sw.Exists)")
+    $L.Add("本地存储体积   : $(Fmt-Size $sw.Size)")
+    $L.Add("缓存软信号     : Cache=$($sw.Cache) Flag=$($sw.CacheFlag)")
+    try {
+        [System.IO.File]::WriteAllLines($path, $L.ToArray(), (New-Object System.Text.UTF8Encoding($true)))
+        Write-Host ''
+        Write-C "  [OK] 诊断报告已保存：" 'Green'
+        Write-C "       $path" 'White'
+        Write-C '       把这台机器的报告发回来即可定位。（不含任何账号 / 密钥信息）' 'Gray'
+    } catch {
+        Write-C "  [X] 保存失败：$($_.Exception.Message)" 'Red'
+    }
+    if (Test-Interactive) {
+        Write-Host ''
+        Write-C '  按回车继续…' 'DarkGray'
+        [void](Read-Host)
+    }
+}
+
 function Invoke-Clean([switch]$Force) {
     $items = @()
     foreach ($it in $script:Leftovers) {
@@ -875,39 +1506,68 @@ function Invoke-Clean([switch]$Force) {
 function Invoke-Net {
     $cfg = Get-Cfg
     Write-Host ''
-    Write-C '  === 网络与语言包检测 ========================================' 'Cyan'
-    Write-C '  说明：本工具的汉化完全离线，不需要任何联网操作。' 'Green'
-    Write-C '        这里只是帮你确认应用联网是否正常、代理是否可用。' 'Gray'
+    Write-C '  === 网络 / 代理检测 ==========================================' 'Cyan'
+    Write-C '  目的：确认应用能不能拿到汉化开关（enable_i18n）。' 'White'
+    Write-Host ''
+
+    $sp = Get-SystemProxy
+    if ($sp.Enabled -and $sp.Uri) {
+        Write-C ("  系统代理：已开启 $($sp.Uri)   （应用的 Electron 网络栈走的就是它）") 'Green'
+    } elseif ($sp.AutoConfig) {
+        Write-C ("  系统代理：PAC $($sp.AutoConfig)") 'Gray'
+    } else {
+        Write-C '  系统代理：未开启 —— 应用会直连，而关键域名在国内被墙。' 'Yellow'
+    }
+    if ($sp.Note) { Write-C ("            $($sp.Note)") 'DarkGray' }
     Write-Host ''
 
     $targets = @(
-        @{ N = 'ChatGPT / Codex 服务'; U = 'https://chatgpt.com' },
-        @{ N = 'OpenAI API';           U = 'https://api.openai.com' },
-        @{ N = 'GitHub（汉化包来源）';  U = 'https://api.github.com' }
+        @{ N = 'ab.chatgpt.com';        U = 'https://ab.chatgpt.com';        D = '<== 汉化开关：就从这个域名下发' },
+        @{ N = 'api.oaistatsig.com';    U = 'https://api.oaistatsig.com';    D = '事件上报（国内通常可直连）' },
+        @{ N = 'statsigcdn.openai.com'; U = 'https://statsigcdn.openai.com'; D = '配置 CDN 备用端点' },
+        @{ N = 'chatgpt.com';           U = 'https://chatgpt.com';           D = '登录 / 对话主站' },
+        @{ N = 'api.openai.com';        U = 'https://api.openai.com';        D = 'API' }
     )
+    $proxyUri = if ($sp.Enabled -and $sp.Uri) { $sp.Uri } else { $cfg.proxy }
+
+    Write-C ('    ' + (PadR '域名' 24) + (PadR '直连' 10) + (PadR '代理' 10) + '说明') 'White'
     foreach ($t in $targets) {
-        foreach ($mode in @('direct', 'proxy')) {
-            if ($mode -eq 'proxy' -and -not $cfg.proxy) { continue }
-            $label = if ($mode -eq 'direct') { '直连' } else { "代理 $($cfg.proxy)" }
-            $okTxt = ''; $col = 'Red'
+        $direct = Test-Tcp443 -HostName $t.N -TimeoutMs 5000
+        $via = '无代理'
+        if ($proxyUri) {
+            $via = '不可达'
             try {
-                $req = @{ Uri = $t.U; Method = 'Head'; TimeoutSec = 8; UseBasicParsing = $true }
-                if ($mode -eq 'proxy') { $req['Proxy'] = $cfg.proxy }
+                $req = @{ Uri = $t.U; Method = 'Head'; TimeoutSec = 10; UseBasicParsing = $true
+                          Proxy = $proxyUri; UserAgent = 'Mozilla/5.0' }
                 Invoke-WebRequest @req | Out-Null
-                $okTxt = '可达'; $col = 'Green'
+                $via = '可达'
             } catch {
-                $okTxt = '不可达'
-                if ("$($_.Exception.Message)" -match 'timed out|超时') { $okTxt = '超时' }
+                $m = "$($_.Exception.Message)"
+                if ($m -match 'timed out|超时') { $via = '超时' } else { $via = '有响应' }
             }
-            Write-Host ('    ' + (PadR $t.N 22)) -NoNewline
-            Write-Host (PadR $label 24) -NoNewline
-            Write-C $okTxt $col
         }
+        $c1 = if ($direct -eq '可达') { 'Green' } else { 'Yellow' }
+        $c2 = if ($via -eq '可达' -or $via -eq '有响应') { 'Green' } elseif ($via -eq '无代理') { 'DarkGray' } else { 'Red' }
+        Write-Host ('    ' + (PadR $t.N 24)) -NoNewline
+        Write-CN (PadR $direct 10) $c1
+        Write-CN (PadR $via 10) $c2
+        Write-C $t.D 'DarkGray'
     }
+
     Write-Host ''
-    Write-C '  语言包说明：中文资源已内置于应用，' 'White'
-    Write-C '  只要上面「直连」能通（或配置代理后能通），应用功能就是完整的；' 'White'
-    Write-C '  连不上只影响登录/对话，不影响界面中文。' 'White'
+    $vd = Get-SwitchVerdict -Refresh -TimeoutMs 15000
+    $verdictTxt = if ($vd.PrimaryOk) { '请求成功' } else { '请求失败' }
+    Write-C ("  开关实测（$($vd.Primary)）：$verdictTxt") 'White'
+    Show-SwitchVerdict $vd
+    Write-Host ''
+    Write-C '  提示：' 'DarkGray'
+    Write-C '    · 中文语言包 100% 内置于应用（原生菜单与前端 chunk 各 64 种语言，一一对应），' 'Gray'
+    Write-C '      不需要下载；简体中文为 196 键 + 1.3 MB 前端资源。' 'Gray'
+    Write-C '    · ab.chatgpt.com 在国内直连必然超时，所以「直连」列是超时属正常现象。' 'Gray'
+    Write-C '    · 只要「代理」列那一行有响应，重启应用一次就能拿到中文；开关随即落盘，长期有效。' 'Gray'
+    Write-C '    · chatgpt.com / api.openai.com 不通只影响登录与对话，与界面中文无关。' 'DarkGray'
+    Write-C '    · 这个域名是很多代理订阅的漏网之鱼：规则里往往只写了 chatgpt.com / openai.com，' 'Yellow'
+    Write-C '      记得补上 ab.chatgpt.com，或者临时切到全局（Global）模式跑一次。' 'Yellow'
 }
 
 function Invoke-Launch {
@@ -950,7 +1610,10 @@ function Invoke-Settings {
         Write-Host ''
         Write-C '  === 设置 ====================================================' 'Cyan'
         Write-C ("    1) 应用安装路径 : " + $(if ($cfg.appPath) { $cfg.appPath } else { '(自动检测)' })) 'White'
-        Write-C ("    2) 网络代理     : " + $(if ($cfg.proxy) { $cfg.proxy } else { '(不使用)' })) 'White'
+        $spc = Get-SystemProxy
+        $spTxt = if ($spc.Enabled -and $spc.Uri) { "已开启 $($spc.Uri)   (自动识别，应用也走它)" } else { '未开启（请在代理软件里开系统代理 / TUN）' }
+        Write-C ("    系统代理       : $spTxt") 'Gray'
+        Write-C ("    2) 备用代理     : " + $(if ($cfg.proxy) { $cfg.proxy } else { '(未设置；留空即自动使用系统代理)' })) 'White'
         Write-C ("    3) 横幅样式     : $($cfg.banner)   [auto|full|compact]") 'White'
         Write-C ("    4) 自动备份     : $($cfg.autoBackup)") 'White'
         Write-C '    0) 返回' 'White'
@@ -967,9 +1630,10 @@ function Invoke-Settings {
                 } else { Write-C '  已清空，改回自动检测。' 'Gray' }
             }
             '2' {
-                $v = Read-Host '  输入代理，如 http://127.0.0.1:7890，留空=不使用'
+                $v = Read-Host '  输入备用代理，如 http://127.0.0.1:7890，留空=自动使用系统代理'
                 $cfg.proxy = "$v".Trim()
                 Save-Cfg $cfg
+                $script:Verdict = $null
                 Write-C '  已保存。' 'Green'
             }
             '3' {
@@ -999,8 +1663,9 @@ function Show-Menu {
         @('[1] 一键汉化 / 修复', '[2] 环境体检报告'),
         @('[3] 切换界面语言', '[4] 还原英文设置'),
         @('[5] 启动 ChatGPT / Codex', '[6] 清理副产物'),
-        @('[7] 设置', '[8] 网络 / 代理检测'),
-        @('[Q] 退出', '[R] 刷新面板')
+        @('[7] 远程开关自检与修复', '[8] 网络 / 代理检测'),
+        @('[9] 设置', '[Q] 退出'),
+        @('[R] 刷新面板', '')
     )
     $colW = [int](($CW - 5) / 2)
     $colW2 = ($CW - 5) - $colW
@@ -1035,12 +1700,13 @@ function Start-Menu {
             '4' { Invoke-Restore }
             '5' { Invoke-Launch }
             '6' { Invoke-Clean }
-            '7' { Invoke-Settings }
+            '7' { Invoke-SwitchFix }
             '8' { Invoke-Net }
-            'r' { Get-AppProbe -Refresh | Out-Null; continue }
+            '9' { Invoke-Settings }
+            'r' { Get-AppProbe -Refresh | Out-Null; $script:SwitchState = $null; $script:Verdict = $null; $script:TcpProbe = $null; continue }
             'q' { return }
             '' { continue }
-            default { Write-C '  无效选择，请输入 1-8 / R / Q。' 'Red' }
+            default { Write-C '  无效选择，请输入 1-9 / R / Q。' 'Red' }
         }
         Write-Host ''
         Write-C '  按回车返回主菜单…' 'DarkGray'
@@ -1063,6 +1729,8 @@ try {
         'clean'     { Invoke-Clean -Force:$Yes }
         'net'       { Invoke-Net }
         'launch'    { Invoke-Launch }
+        'switch'    { Invoke-SwitchFix -NoPrompt }
+        'diag'      { Save-DiagReport }
     }
 } catch {
     Write-Host ''
