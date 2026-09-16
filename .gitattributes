@@ -1,0 +1,7 @@
+# Windows 脚本保持 CRLF（PowerShell 5.1 / cmd 的默认预期），且不丢 UTF-8 BOM
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+
+# 文档用 LF 即可
+*.md   text eol=lf
+LICENSE text eol=lf
