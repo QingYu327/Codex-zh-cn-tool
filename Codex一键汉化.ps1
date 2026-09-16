@@ -39,7 +39,7 @@
       —— DJB2 初值是 0，输入只有本机 stableID 一个变量，而 stableID 的存储键
       statsig.stable_id.685440364 的后缀是跨机器常量。
       => v1.2.0「加速包」失败的原因是整目录照搬了别台机器的键（键对不上），
-         不是"机制上不可能"。v2.1.0 据此实现【离线开关注入】（菜单 [7]->2）：
+         不是"机制上不可能"。v2.1.0 据此实现【离线开关注入】（v2.1.4 起独立为菜单 [7]）：
          读/写本机 stableID -> 现场算键 -> 按 LevelDB WriteBatch 格式写缓存，
          全程无代理无联网。本机已完整 E2E 实测：删缓存变英文，注入变回中文。
     · 【v2.1.3 修正 · 必看】离线注入曾连着三次「报成功却无效」，根因是脚本内部
@@ -52,10 +52,32 @@
         ③ 注入后按 crc 复读校验（旧版只看结构，坏记录也能"通过自检"）；
         ④ 同一份 payload 改写成 4 个变体键名（uid 空 / ua-<sid> × cids 全量 / 仅
            stableID），不同 SDK 版本或登录态下取值不同时也能命中，纯冗余兜底。
+
+  【v2.1.4 变更】菜单与体验
+    · [7] = 离线注入汉化开关（纯本地，秒级完成，不做任何联网探测）
+      [8] = 在线诊断与修复（原来的远程开关自检，需要代理）
+      [9] = 网络 / 代理检测     [0] = 设置
+      —— 之前 [7] 里混着联网自检，光探测就要等 20 多秒，现已被拆开。
+    · 状态面板不再做 TCP 探测（以前每次重绘都白等 2.5 秒超时）。
+    · 修掉 v2.1.3 的一个自检误报：Read-LevelDbLogTail 忘了返回 BadCrc/Checked/EvalCnt，
+      调用方拿到 $null -> 判断必然失败 -> 写入明明成功却报「自检未通过」。
+
+  【重要 · 别踩】「文件 → 打开文件夹」菜单项消失 ≠ 汉化的副作用
+    实测取证（本机日志 + asar 逐字比对）：
+      · 该菜单项命令 openFolder 的 requiredAccess 是 codexOrWorkLocal；
+      · 主进程的 {codexLocal, workLocal} 来自渲染进程广播的 IPC 消息
+        electron-desktop-features-changed 里的 codexLocalAccess / workLocalAccess；
+      · 而这两个值出自 Cun()：未登录 / 拿不到账号套餐时返回
+        {status:'denied', reason:'missing-account'} -> 菜单项被摘掉；
+        登录且套餐属 free/go/plus/prolite/pro 时才 {status:'allowed'}。
+      => 即它取决于「是否登录 ChatGPT + 账号接口是否可达」，与 statsig 缓存无关。
+    本机日志实证：应用未登录（提示 Sign in to ChatGPT...），
+    /settings/user 等账号接口 ERR_CONNECTION_TIMED_OUT，~/.codex/auth.json 不存在。
+    结论：重置 Codex 会清掉登录态 -> 该菜单项消失；重新登录后即恢复。
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('menu', 'check', 'apply', 'restore', 'languages', 'clean', 'net', 'launch', 'report', 'switch', 'inject', 'diag')]
+    [ValidateSet('menu', 'check', 'apply', 'restore', 'languages', 'clean', 'net', 'launch', 'report', 'switch', 'inject', 'online', 'diag')]
     [string]$Action = 'menu',
     [string]$Language = '',
     [switch]$Yes,
@@ -72,7 +94,7 @@ if ($PSScriptRoot) { $script:Root = $PSScriptRoot }
 else { $script:Root = Split-Path -Parent $MyInvocation.MyCommand.Definition }
 
 $script:AppName   = '睡醒的夜猫子 · Codex 一键汉化'
-$script:Version   = 'v2.1.3'
+$script:Version   = 'v2.1.4'
 $script:CfgPath   = Join-Path $env:USERPROFILE '.wakecat-i18n.json'
 $script:CodexHome = Join-Path $env:USERPROFILE '.codex'
 $script:ConfigToml = Join-Path $script:CodexHome 'config.toml'
@@ -575,7 +597,7 @@ function Show-SwitchVerdict {
     # 把判定结果翻译成一句人话 + 下一步动作
     param($Vd, [switch]$Brief)
     if (-not $Vd -or -not $Vd.Tested) {
-        Write-C '        尚未检测。进入菜单 [7] 做一次远程开关自检。' 'DarkGray'
+        Write-C '        尚未检测。进菜单 [8] 做一次在线自检（或直接看应用是否已是中文）。' 'DarkGray'
         return
     }
     if ($Vd.PrimaryOk -and $Vd.Enable -eq $true) {
@@ -616,7 +638,7 @@ function Show-SwitchVerdict {
         Write-C '           最省事的做法：切到全局（Global）模式跑一次。' 'Gray'
         Write-C '        3) 完全退出 Codex（托盘图标右键 -> 退出，关窗口不算），再重新打开。' 'White'
         Write-C '        4) 等 10~15 秒，界面会自己切成中文（只需成功一次，之后离线也有效）。' 'White'
-        Write-C '        5) 回到本工具点 [R] 刷新面板，或再做一次 [7] 复测。' 'White'
+        Write-C '        5) 回到本工具点 [R] 刷新面板，或再做一次 [8] 复测。' 'White'
     }
 }
 
@@ -1117,17 +1139,16 @@ function Get-PanelRows {
         if ($vd.PrimaryOk -and $vd.Enable -eq $true) {
             $rows.Add(@('语言开关', "enable_i18n = true  ($($vd.Primary)) · 中文可用", 'Green'))
         } elseif ($vd.PrimaryOk) {
-            $rows.Add(@('语言开关', "enable_i18n = $($vd.Enable)  ($($vd.Primary))  -> [7]", 'Red'))
+            $rows.Add(@('语言开关', "enable_i18n = $($vd.Enable)  ($($vd.Primary))  -> [8]", 'Red'))
         } else {
-            $rows.Add(@('语言开关', "拉取失败（$($vd.Primary)）  -> 菜单 [7] 修复", 'Red'))
+            $rows.Add(@('语言开关', "拉取失败（$($vd.Primary)）  -> [7] 离线注入 或 [8] 在线修复", 'Red'))
         }
     } else {
-        # 面板每次重绘都联网太慢，这里只做一次几毫秒级的 TCP 探测，权威判定在菜单 [7]
-        if (-not $script:TcpProbe) { $script:TcpProbe = Test-Tcp443 -HostName 'ab.chatgpt.com' -TimeoutMs 2500 }
-        $tk = $script:TcpProbe
-        $col = if ($tk -eq '可达') { 'Green' } elseif ($sp.Enabled -and $sp.Uri) { 'Gray' } else { 'Yellow' }
-        $note = if ($sp.Enabled -and $sp.Uri) { '(直连被墙属正常，走代理即可)' } else { '<- 关键域名，直连被墙' }
-        $rows.Add(@('汉化开关', "ab.chatgpt.com 直连 $tk  $note", $col))
+        # 面板一律不做联网探测：以前这里每次重绘都白等 2.5 秒 TCP 超时，非常拖沓。
+        # 想看 ab.chatgpt.com 通不通，进 [8] 在线诊断 / [9] 网络检测；纯离线走 [7]。
+        $col = if ($sp.Enabled -and $sp.Uri) { 'Gray' } else { 'Yellow' }
+        $note = if ($sp.Enabled -and $sp.Uri) { '（已开代理，规则需覆盖该域名）' } else { '直连被墙；无代理请用 [7] 离线注入' }
+        $rows.Add(@('汉化开关', "未做联网检测（面板纯本地）  $note", $col))
     }
 
     if ($cfg.proxy) { $rows.Add(@('本工具代理', $cfg.proxy, 'DarkGray')) }
@@ -1246,7 +1267,7 @@ function Invoke-Apply([string]$locale) {
     }
     Write-Host ''
     Write-C '  若条件二也通过了、界面仍是英文：完全退出应用（托盘图标右键 -> 退出）后重启即可。' 'Gray'
-    Write-C '  若条件二没通过：进菜单 [7] —— 有代理走「自检修复」，无代理/离线走「离线注入」。' 'Yellow'
+    Write-C '  若条件二没通过：[7] = 离线注入（纯本地，秒出，无需代理）；[8] = 在线自检修复。' 'Yellow'
     Write-C '  （v1.2.0 的「汉化加速包」已删除：搬来的缓存键绑的是原机器的 stableID，' 'DarkGray'
     Write-C '    换台机器就对不上号 —— 所以改成「读本机 stableID 现场算键再注入」。）' 'DarkGray'
 }
@@ -1351,7 +1372,7 @@ function Invoke-Check {
     } else {
         Write-C '    [!] 条件二：实测拿不到 enable_i18n。语言包是内置的，但这个开关必须由应用' 'Yellow'
         Write-C '        联网向 ab.chatgpt.com 拉一次 —— 该域名在国内被墙，开系统代理/TUN 并' 'Yellow'
-        Write-C '        确保代理规则覆盖它即可。菜单 [7] 有分步操作。' 'Yellow'
+        Write-C '        确保代理规则覆盖它即可。菜单 [8] 有分步操作（[9] 可先做连通性检测）。' 'Yellow'
     }
     Write-C '    旧版第三方汉化包（复制 app.asar 到用户目录那套）在此版本上属于负优化，不建议使用。' 'DarkGray'
 }
@@ -1521,7 +1542,19 @@ function Read-LevelDbLogTail([string]$LogPath, [switch]$VerifyCrc) {
         elseif ($typ -eq 4) { $buf = @($buf) + @($body); & $flush ([byte[]]$buf) $st; $buf = $null }
         $pos += 7 + $len
     }
-    [pscustomobject]@{ EndPos = $pos; MaxSeq = $st.MaxSeq; StableIdRaw = $st.Sid; Size = $n }
+    # 注意：这里必须把 BadCrc / Checked / EvalCnt 一并返回。
+    # v2.1.3 一开始漏了这三个字段 -> 调用方拿到 $null -> `-eq 0` 不成立 ->
+    # 明明写入成功却报「自检未通过」（纯误报）。字段名改动时记得同步这里。
+    [pscustomobject]@{
+        EndPos      = $pos
+        Size        = $n
+        MaxSeq      = $st.MaxSeq
+        StableIdRaw = $st.Sid
+        SidSeq      = $st.SidSeq
+        BadCrc      = [int]$st.BadCrc
+        Checked     = [int]$st.Checked
+        EvalCnt     = [int]$st.EvalCnt
+    }
 }
 
 function Get-LevelDbStableId([string]$LevelDbDir) {
@@ -1602,7 +1635,7 @@ function Invoke-OfflineInject {
         return
     }
 
-    Write-C '  === 离线开关注入 ==============================================' 'Cyan'
+    Write-C '  === 离线开关注入（菜单 [7] · 纯本地，全程不联网）================' 'Cyan'
     Write-C '  面向「国内无代理 / 离线」的机器：不联网，直接把汉化开关' 'Gray'
     Write-C '  （enable_i18n = true）写进应用本地缓存。原理：缓存键只由本机' 'Gray'
     Write-C '  stableID 决定，本工具读出 / 写入 stableID 后现场计算键名。' 'Gray'
@@ -1804,6 +1837,9 @@ function Invoke-OfflineInject {
         Write-C ("  [OK] 注入完成，自检通过（已校验 crc 的记录 " + $tail2.Checked + " 条 / 非法 0 条）。") 'Green'
         Write-C ("       缓存条目 " + $tail2.EvalCnt + " 条已就位，启动 / 重启应用即可看到中文界面 —— 全程无需代理。") 'White'
         Write-C '       （应用下次能联网时会照常向服务端刷新，结果一致，不影响。）' 'DarkGray'
+        Write-C '       · 顺带一提：若「文件 → 打开文件夹」等菜单项不见了，那是【未登录 ChatGPT】' 'DarkGray'
+        Write-C '         导致的（该菜单项的 requiredAccess 依赖账号套餐），与本次汉化无关；' 'DarkGray'
+        Write-C '         登录成功后会自动回来。' 'DarkGray'
     } else {
         Write-C ("  [X] 自检未通过：crc 非法的记录 " + $tail2.BadCrc + " 条 / 已校验 " + $tail2.Checked + " 条，") 'Red'
         Write-C ("      尾部解析 " + $tail2.EndPos + " / " + $tail2.Size + "，缓存条目 " + $tail2.EvalCnt + " 条。") 'Red'
@@ -1824,7 +1860,8 @@ function Invoke-SwitchFix {
     param([switch]$NoPrompt)
     while ($true) {
         Write-Host ''
-        Write-C '  === 远程开关自检与修复（条件二）=============================' 'Cyan'
+        Write-C '  === [8] 在线诊断与修复（需要网络 / 代理）=====================' 'Cyan'
+        Write-C '  纯离线机器请直接用菜单 [7]：不联网、不做探测、秒级完成。' 'Yellow'
         Write-C '  界面语言由两个条件共同决定：' 'Gray'
         Write-C '    条件一 localeOverride        —— 本工具负责，纯本地即可完成（菜单 [1]）' 'Gray'
         Write-C '    条件二 远程开关 enable_i18n  —— 应用启动时向 ab.chatgpt.com 拉取' 'Gray'
@@ -1860,7 +1897,7 @@ function Invoke-SwitchFix {
 
         Write-Host ''
         Write-C '    1) 重新检测' 'White'
-        Write-C '    2) 离线开关注入（国内无代理 / 离线机器用这个）' 'White'
+        Write-C '    2) 离线开关注入（同菜单 [7]；不联网时直接用它）' 'White'
         Write-C '    3) 启动 / 重启应用（让它去拉开关）' 'White'
         Write-C '    4) 保存诊断报告到文件' 'White'
         Write-C '    0) 返回' 'White'
@@ -2146,9 +2183,9 @@ function Show-Menu {
         @('[1] 一键汉化 / 修复', '[2] 环境体检报告'),
         @('[3] 切换界面语言', '[4] 还原英文设置'),
         @('[5] 启动 ChatGPT / Codex', '[6] 清理副产物'),
-        @('[7] 汉化开关：自检 / 离线注入', '[8] 网络 / 代理检测'),
-        @('[9] 设置', '[Q] 退出'),
-        @('[R] 刷新面板', '')
+        @('[7] 离线注入汉化开关（纯本地）', '[8] 在线诊断与修复（联网）'),
+        @('[9] 网络 / 代理检测', '[0] 设置'),
+        @('[R] 刷新面板', '[Q] 退出')
     )
     $colW = [int](($CW - 5) / 2)
     $colW2 = ($CW - 5) - $colW
@@ -2183,13 +2220,14 @@ function Start-Menu {
             '4' { Invoke-Restore }
             '5' { Invoke-Launch }
             '6' { Invoke-Clean }
-            '7' { Invoke-SwitchFix }
-            '8' { Invoke-Net }
-            '9' { Invoke-Settings }
+            '7' { Invoke-OfflineInject }
+            '8' { Invoke-SwitchFix }
+            '9' { Invoke-Net }
+            '0' { Invoke-Settings }
             'r' { Get-AppProbe -Refresh | Out-Null; $script:SwitchState = $null; $script:Verdict = $null; $script:TcpProbe = $null; continue }
             'q' { return }
             '' { continue }
-            default { Write-C '  无效选择，请输入 1-9 / R / Q。' 'Red' }
+            default { Write-C '  无效选择，请输入 0-9 / R / Q。' 'Red' }
         }
         Write-Host ''
         Write-C '  按回车返回主菜单…' 'DarkGray'
@@ -2212,8 +2250,9 @@ try {
         'clean'     { Invoke-Clean -Force:$Yes }
         'net'       { Invoke-Net }
         'launch'    { Invoke-Launch }
-        'switch'    { Invoke-SwitchFix -NoPrompt }
         'inject'    { Invoke-OfflineInject -NoPrompt }
+        'online'    { Invoke-SwitchFix -NoPrompt }
+        'switch'    { Invoke-SwitchFix -NoPrompt }
         'diag'      { Save-DiagReport }
     }
 } catch {
