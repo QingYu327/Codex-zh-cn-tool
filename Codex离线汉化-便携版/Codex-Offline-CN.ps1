@@ -30,7 +30,10 @@ $script:BackupDir  = Join-Path $script:Root 'backups'
 $script:CodexHome  = Join-Path $env:USERPROFILE '.codex'
 $script:ConfigToml = Join-Path $script:CodexHome 'config.toml'
 $script:CuConfig   = Join-Path $script:CodexHome 'computer-use\config.json'
+$script:Probe      = $null
 $script:StatsigKey = 'client-sYWqzCYMRkUg4DqqiZcR5DGTNl2iD7zNJY0HoeDLzxR'
+$script:CfgPath      = Join-Path $env:USERPROFILE '.wakecat-i18n.json'
+$script:BackupDirAlt = Join-Path $env:LOCALAPPDATA 'Codex-i18n\backups'
 
 $script:InnerTemplateB64 = 'H4sIAAAAAAAC/41UyW7bMBT8F51tQZKtLbciCdB0SYIeUhRFQdDkk8WaJgUuTtTA/95HSY7SpCl6sjl8M5y36TFqgDpvgGypAxud' `
     + 'ff+xiHiv6F4wwrRqxHYCJe3BzNBjVGZZWqR1Fv5jPERnM7SIjJdABEeQQ0O9dIhZQDqnpifw0GmLr07aBzBWaBWdpSkeqPQQRKVm' `
@@ -41,94 +44,35 @@ $script:InnerTemplateB64 = 'H4sIAAAAAAAC/41UyW7bMBT8F51tQZKtLbciCdB0SYIeUhRFQdDk
     + 'wgW6mW+yIq6TKi6TKi1mwbu/6l2P8/1VKI5Rc/SEn7dG45/ZlXqBa3uCZgnEDm/afHb1wue4FYj/apfn19FxbE0YWr4Lo3Qqd1ZX' `
     + 'q2Rdl1keWkUVMTjUJsy2HYWnqRyP061QW4L9D/McJ7jET+AGn909W6PXtA6bSFmP+s7heejjCdtrHhzvhQp+g9FG0jFkXGdOpN4S' `
     + 'OIByJIyV+dPktPP/iJlkn32eJM4UGb4lllDvNFptkNISoXDp8WLacgwukgT5jZeSsBbYzvo9uq3qMl2n6wznIMlwW5I8i46/Aez+' `
-    + 'xfUwBQAA'
 
-$BannerFull = @(
-    '                             ▄▄▄▄▄▄        ▄     ▄               ▄▄               ▄  ▄   ▄                       '
-    '  ▄▄▄▄ ██████▀▀▀    ▀▀████▀▀ █▀▀▀▀█       ██    ██         ▄▄▄▄▄▄██▄▄▄▄▄▄     ▀█▄█▀▄▄██▄▄█▄▄      ▀▀▀▀▀▀▀▀███▀   '
-    '  █  █▄▄▄▄▄█▄▄▄▄▄    ▄████▄▄ █▀▀▀▀█     ██████ ▄██████        █  ▀█▀          ▄███ ▀▀██▀▀█▀▀▀          ▄▄█▀      '
-    '  █▀██  █▀ █ ▀█     ████████ ██████     ██   █▄█▀    █       ██  ███████     ▀▀  █  ▄█▄▄▄█▄▄     ▄     ██     ▄  '
-    '  █▄▄█▄█████████▄   ▀██▀████▄█▄██▄▄     ██▄▄▄█  ██   █     ▄██ ▄██ ▄▄ █▀       ▄██ ██▀▀██▀██    ▀▀▀▀▀▀▀██▀▀▀▀▀▀▀ '
-    '  █▀▀█  █  █  █      █▀  ▀███▀▀██▀▀     ██   █   ██ ██    ██▀█ ▀▀██ ▀██      ▄█▀ █ ██▄▄██▄██           ██        '
-    '  █▄██▀█▀█████▀█▀   ▄█▀▀▀▀██ ▀▀██▀▀     ██▄▄▄█      ██       █    ███▀           █ ██  ██ ██           ██        '
-    ' ▀█  ▀ ▄▄▄▄█▄▄▄▄    ▄███████▄▄▄██▄▄▄    ██▀▀▀█   ▄▄▄█▀       █ ▄▄██▀▀██▄▄▄    ▄▄█▀ █████████         ███▀        '
-    '                     ▀    ▀                       ▀▀         ▀ ▀▀      ▀▀      ▀    ▀      ▀                     '
-)
 
-function Get-ConWidth {
-    try { $w = $Host.UI.RawUI.WindowSize.Width; if ($w -ge 40) { return [int]$w } } catch { }
-    try { $w = [Console]::WindowWidth; if ($w -ge 40) { return [int]$w } } catch { }
-    100
+function Get-Cfg {
+    $def = [ordered]@{
+        appPath    = ''
+        language   = 'zh-CN'
+        proxy      = ''
+        banner     = 'auto'
+        autoBackup = $true
+    }
+    if (Test-Path -LiteralPath $script:CfgPath) {
+        try {
+            $j = Get-Content -LiteralPath $script:CfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($k in @($def.Keys)) { if ($null -ne $j.$k -and "$($j.$k)" -ne '') { $def[$k] = $j.$k } }
+        } catch { }
+    }
+    [pscustomobject]$def
 }
 
-function Show-Banner {
-    $w = Get-ConWidth
-    if ($w -ge 118) { $lines = $BannerFull }
-    elseif ($w -ge 106) { $lines = $BannerMid }
-    elseif ($w -ge 94)  { $lines = $BannerSmall }
-    else { $lines = $BannerCompact }
-    Write-Host ''
-    foreach ($ln in $lines) { Write-C (Center $ln) 'Cyan' }
-    Write-Host ''
-    $sub = "$($script:Version)   .   " + (Get-Date -Format 'yyyy-MM-dd HH:mm')
-    Write-C (Center $sub) 'DarkGray'
-    Write-Host ''
-}
-
-$BannerFull = @(
-    '                             ▄▄▄▄▄▄        ▄     ▄               ▄▄               ▄  ▄   ▄                       '
-    '  ▄▄▄▄ ██████▀▀▀    ▀▀████▀▀ █▀▀▀▀█       ██    ██         ▄▄▄▄▄▄██▄▄▄▄▄▄     ▀█▄█▀▄▄██▄▄█▄▄      ▀▀▀▀▀▀▀▀███▀   '
-    '  █  █▄▄▄▄▄█▄▄▄▄▄    ▄████▄▄ █▀▀▀▀█     ██████ ▄██████        █  ▀█▀          ▄███ ▀▀██▀▀█▀▀▀          ▄▄█▀      '
-    '  █▀██  █▀ █ ▀█     ████████ ██████     ██   █▄█▀    █       ██  ███████     ▀▀  █  ▄█▄▄▄█▄▄     ▄     ██     ▄  '
-    '  █▄▄█▄█████████▄   ▀██▀████▄█▄██▄▄     ██▄▄▄█  ██   █     ▄██ ▄██ ▄▄ █▀       ▄██ ██▀▀██▀██    ▀▀▀▀▀▀▀██▀▀▀▀▀▀▀ '
-    '  █▀▀█  █  █  █      █▀  ▀███▀▀██▀▀     ██   █   ██ ██    ██▀█ ▀▀██ ▀██      ▄█▀ █ ██▄▄██▄██           ██        '
-    '  █▄██▀█▀█████▀█▀   ▄█▀▀▀▀██ ▀▀██▀▀     ██▄▄▄█      ██       █    ███▀           █ ██  ██ ██           ██        '
-    ' ▀█  ▀ ▄▄▄▄█▄▄▄▄    ▄███████▄▄▄██▄▄▄    ██▀▀▀█   ▄▄▄█▀       █ ▄▄██▀▀██▄▄▄    ▄▄█▀ █████████         ███▀        '
-    '                     ▀    ▀                       ▀▀         ▀ ▀▀      ▀▀      ▀    ▀      ▀                     '
-)
-$BannerMid = @(
-    '                  ▄▄▄▄▄▄  ▄▄▄▄▄       ▄    ▄▄             ▄▄             ▄  ▄  ▄▄       ▄            '
-    ' ▄███ ▀▀▀██▀▀▀    ▀▀█▀█▀▀██▄▄▄█▀     ▄█    ██       ▄████████████     ▀██▀▄▄█▄▄██▄▄     ▀▀▀▀▀▀███▀   '
-    ' ██▄██████████    ██████▄██▀▀▀█▄    █▀▀▀█ ▄█▀▀▀█       █▄ ▄█▄▄▄      ▄▄▀█   █▀ ██           ▄█▀      '
-    ' ██▀█▄▄█▄▄█▄█▄    ███████ █▀█▀▀     █   ██▀▄   █      ██ ▄█▀▀▀▀█        ██ ███████    ▄▄▄▄▄▄██▄▄▄▄▄▄ '
-    ' ████▀▀█▀▀█▀█▀▀   ██▀ ▀████▀██▀▀    █▀▀▀█  ▀█  █    ▄███▄██▄▀▄█▀      ▄███ █▄▄█▄▄█          ██       '
-    ' ██▄██▄████▄██▄   ███████▀▄▄██▄     █   █   ▀  █    ▀ ██  ▀█▄█▀      ▀▀ ██ █▀▀█▀▀█          ██       '
-    ' ██▀█ ▄▄▄██▄▄▄    ██▄▄▄██▄▄▄█▄▄▄    █▀▀▀█   ▄▄▄█      ██ ▄▄█▀█▄▄▄     ▄▄█  █▄██▄▄█        ▄▄██       '
-    '       ▀▀▀▀▀▀▀    ▀    ▀▀           ▀       ▀▀▀       ▀▀ ▀     ▀▀     ▀▀   ▀     ▀                   '
-)
-$BannerSmall = @(
-    '          ▄▄    ▄▄▄▄▄▄▄▄▄▄▄▄     ▄▄   ▄▄           ▄▄         ▄ ▄▄ ▄  ▄       ▄▄▄▄▄▄▄▄   '
-    ' ██▀█ ▀▀██▀▀     ████ ██▄▄██    ▄██▄  █▄▄▄    ▀██████▀▀▀▀▀    ▀█▀█▄██▄█▄▄     ▀▀▀▀▄██▀   '
-    ' ████▀█▀█▀▀█▀   ██████▀█▄▄██    █▀▀█▄█▀  ██     ██ ▄█▄▄▄▄    █▀▀█  █▄ █▄         ██      '
-    ' █▄▄█████████   ██████▄█▄█▄▄    █▄▄█▀ █▄ ██    ██ ▄█ ▄ █▀     ▄██ █▀▀█▀██   ▀▀▀▀▀██▀▀▀▀▀ '
-    ' ██▀█▄█▄█▄▄█▄   ██▄▄██▀▄██▄▄    █  ██  ▀ ██   ▀▀█▀▀▀█▄█▀     █▀ █ ███████        ██      '
-    ' ██▀█   ██      ██▄▄██▄▄██▄▄    █████   ▄█      █ ▄▄███▄▄      ▄█ █▄▄█▄██       ▄██      '
-    '      ▀▀▀▀▀▀    ▀    ▀▀▀▀▀▀▀    ▀      ▀▀       ▀ ▀▀   ▀▀▀    ▀▀  ▀    ▀▀       ▀        '
-)
-$BannerCompact = @(
-    '  ╔════════════════════════════════════════════╗'
-    '  ║  睡 醒 的 夜 猫 子  ·  Codex 一键汉化      ║'
-    '  ╚════════════════════════════════════════════╝'
-)
-
-function Get-ConWidth {
-    try { $w = $Host.UI.RawUI.WindowSize.Width; if ($w -ge 40) { return [int]$w } } catch { }
-    try { $w = [Console]::WindowWidth; if ($w -ge 40) { return [int]$w } } catch { }
-    100
-}
-
-function Show-Banner {
-    $w = Get-ConWidth
-    if ($w -ge 118) { $lines = $BannerFull }
-    elseif ($w -ge 106) { $lines = $BannerMid }
-    elseif ($w -ge 94)  { $lines = $BannerSmall }
-    else { $lines = $BannerCompact }
-    Write-Host ''
-    foreach ($ln in $lines) { Write-C (Center $ln) 'Cyan' }
-    Write-Host ''
-    $sub = "$($script:Version)   .   " + (Get-Date -Format 'yyyy-MM-dd HH:mm')
-    Write-C (Center $sub) 'DarkGray'
-    Write-Host ''
+function Get-DisplayWidth([string]$s) {
+    $w = 0
+    foreach ($ch in $s.ToCharArray()) {
+        $c = [int]$ch
+        if (($c -ge 0x1100 -and $c -le 0x115F) -or ($c -ge 0x2E80 -and $c -le 0xA4CF) -or
+            ($c -ge 0xAC00 -and $c -le 0xD7A3) -or ($c -ge 0xF900 -and $c -le 0xFAFF) -or
+            ($c -ge 0xFE30 -and $c -le 0xFE6F) -or ($c -ge 0xFF00 -and $c -le 0xFF60) -or
+            ($c -ge 0xFFE0 -and $c -le 0xFFE6)) { $w += 2 } else { $w += 1 }
+    }
+    $w
 }
 
 function PadR([string]$s, [int]$n) {
@@ -150,6 +94,23 @@ function Center([string]$s) {
     $d = [int](($w - (Get-DisplayWidth $s)) / 2)
     if ($d -lt 0) { $d = 0 }
     (' ' * $d) + $s
+}
+
+function Fmt-Size([int64]$b) {
+    if ($b -ge 1073741824) { return ('{0:N2} GB' -f ($b / 1073741824)) }
+    if ($b -ge 1048576)    { return ('{0:N1} MB' -f ($b / 1048576)) }
+    if ($b -ge 1024)       { return ('{0:N1} KB' -f ($b / 1024)) }
+    return "$b B"
+}
+
+function Get-DirSize([string]$p) {
+    if (-not (Test-Path -LiteralPath $p)) { return [int64]0 }
+    $item = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+    if ($item -and -not $item.PSIsContainer) { return [int64]$item.Length }
+    $s = (Get-ChildItem -LiteralPath $p -Recurse -File -Force -ErrorAction SilentlyContinue |
+            Measure-Object -Property Length -Sum).Sum
+    if ($null -eq $s) { return [int64]0 }
+    [int64]$s
 }
 
 function Write-C([string]$text, [string]$color) {
@@ -177,6 +138,28 @@ function Write-CN([string]$text, [string]$color) {
 function Test-Interactive {
     try { if ([Console]::IsInputRedirected) { return $false } } catch { }
     $true
+}
+
+function Read-FileBytes([string]$path) {
+    # 应用运行时 LevelDB 的部分文件（MANIFEST / .log）被独占打开，
+    # ReadAllBytes 会直接抛异常；换成 FileShare.ReadWrite 打开就能读到。
+    # 读不到时返回 $null。
+    try { return [System.IO.File]::ReadAllBytes($path) } catch { }
+    try {
+        $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $len = $fs.Length
+            if ($len -le 0) { return $null }
+            $buf = New-Object byte[] ([int]$len)
+            $read = 0
+            while ($read -lt $buf.Length) {
+                $n = $fs.Read($buf, $read, $buf.Length - $read)
+                if ($n -le 0) { break }
+                $read += $n
+            }
+            return $buf
+        } finally { $fs.Close() }
+    } catch { return $null }
 }
 
 function Copy-FileTreeEfs([string]$Source, [string]$Dest) {
@@ -272,6 +255,29 @@ function Get-StorageLevelDb([string]$profileRoot) {
     }
     $pr = Find-ProfileRoot
     if ($pr) { return (Join-Path $pr 'Default\Local Storage\leveldb') }
+    $null
+}
+
+function Ensure-Backup([string]$path) {
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    # 备份优先放脚本同级 backups\；该位置不可写（例如脚本放在只读目录）时自动退到
+    # %LOCALAPPDATA%。备份只是保险，失败不阻断主流程。每个文件只保留最近 5 份。
+    foreach ($d in @($script:BackupDir, $script:BackupDirAlt)) {
+        if (-not $d) { continue }
+        try {
+            if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+            $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+            $leaf  = Split-Path -Leaf $path
+            $dest  = Join-Path $d ($leaf + '.' + $stamp + '.bak')
+            Copy-Item -LiteralPath $path -Destination $dest -Force
+            Get-ChildItem -LiteralPath $d -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like ($leaf + '.*.bak') } |
+                Sort-Object LastWriteTime -Descending | Select-Object -Skip 5 |
+                ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -Confirm:$false -ErrorAction SilentlyContinue }
+            return $dest
+        } catch { }
+    }
+    Write-C '        [!] 备份目录不可写，已跳过备份（不影响汉化本身）。' 'Yellow'
     $null
 }
 
@@ -945,7 +951,7 @@ function Start-Menu {
     while ($true) {
         Clear-Host
         Write-Host ''
-        Show-Banner
+        Write-C ($script:AppName + '   ' + $script:Version) 'White'
         Show-Status
         Show-Menu
         $c = Read-Host '  请选择'
