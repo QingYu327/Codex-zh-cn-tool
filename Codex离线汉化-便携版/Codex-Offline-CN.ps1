@@ -44,7 +44,7 @@ $script:InnerTemplateB64 = 'H4sIAAAAAAAC/41UyW7bMBT8F51tQZKtLbciCdB0SYIeUhRFQdDk
     + 'wgW6mW+yIq6TKi6TKi1mwbu/6l2P8/1VKI5Rc/SEn7dG45/ZlXqBa3uCZgnEDm/afHb1wue4FYj/apfn19FxbE0YWr4Lo3Qqd1ZX' `
     + 'q2Rdl1keWkUVMTjUJsy2HYWnqRyP061QW4L9D/McJ7jET+AGn909W6PXtA6bSFmP+s7heejjCdtrHhzvhQp+g9FG0jFkXGdOpN4S' `
     + 'OIByJIyV+dPktPP/iJlkn32eJM4UGb4lllDvNFptkNISoXDp8WLacgwukgT5jZeSsBbYzvo9uq3qMl2n6wznIMlwW5I8i46/Aez+' `
-
+    + 'xfUwBQAA'
 
 function Get-Cfg {
     $def = [ordered]@{
@@ -894,13 +894,12 @@ function Invoke-Launch {
 # ---------------------------------------------------------------- 状态检查
 function Show-Status {
     Write-Host ''
-    Write-C '  === 状态 ===' 'Cyan'
     $ok1 = $false
     if (Test-Path -LiteralPath $script:ConfigToml) {
         $c = Get-Content -LiteralPath $script:ConfigToml -Raw -Encoding UTF8
         $ok1 = ($c -match 'localeOverride\s*=\s*"zh-CN"')
     }
-    Write-C ('    条件一 localeOverride = zh-CN : ' + $(if ($ok1) { '已写入' } else { '未写入（选 [1] 一键汉化）' })) $(if ($ok1) { 'Green' } else { 'Yellow' })
+    Write-C ('    条件一 localeOverride = zh-CN : ' + $(if ($ok1) { '已写入' } else { '未写入' })) $(if ($ok1) { 'Green' } else { 'Yellow' })
     $ldb = Get-StorageLevelDb (Find-ProfileRoot)
     $ok2 = $false
     if ($ldb -and (Test-Path -LiteralPath $ldb)) {
@@ -910,14 +909,14 @@ function Show-Status {
             $ok2 = ($t.EvalCnt -ge 1) -and ($t.BadCrc -eq 0)
         }
     }
-    Write-C ('    条件二 开关缓存已注入        : ' + $(if ($ok2) { '已注入' } else { '未注入（选 [1] 一键汉化）' })) $(if ($ok2) { 'Green' } else { 'Yellow' })
+    Write-C ('    条件二 开关缓存已注入        : ' + $(if ($ok2) { '已注入' } else { '未注入' })) $(if ($ok2) { 'Green' } else { 'Yellow' })
     $rt = Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin'
     $hasRt = (Test-Path -LiteralPath $rt) -and (@(Get-ChildItem -LiteralPath $rt -Directory -ErrorAction SilentlyContinue).Count -gt 0)
-    Write-C ('    CLI 运行时（bin 下的哈希目录）: ' + $(if ($hasRt) { '已就绪' } else { '未安装（先启动一次应用自动下载）' })) $(if ($hasRt) { 'Green' } else { 'Yellow' })
+    Write-C ('    CLI 运行时（bin 下的哈希目录）: ' + $(if ($hasRt) { '已就绪' } else { '未安装' })) $(if ($hasRt) { 'Green' } else { 'Yellow' })
     $app = Get-AppxPackage -Name OpenAI.Codex -ErrorAction SilentlyContinue
-    Write-C ('    应用版本                      : ' + $(if ($app) { $app.Version + '  Status=' + $app.Status } else { '未安装' })) 'Gray'
+    Write-C ('    应用版本                      : ' + $(if ($app) { $app.Version } else { '未安装' })) 'Gray'
     Write-Host ''
-    $msg = if ($ok1 -and $ok2) { '两个条件都已就位 —— 启动应用即为中文' } else { '还差条件，按上面提示操作' }
+    $msg = if ($ok1 -and $ok2) { '已就位，启动应用即为中文' } else { '还差条件' }
     Write-C ('    结论：' + $msg) 'White'
 }
 
@@ -926,23 +925,74 @@ function Invoke-RestoreEn {
     Write-C '  === 还原英文设置 ===' 'Cyan'
     if (Test-Path -LiteralPath $script:ConfigToml) {
         Set-TomlLocale $script:ConfigToml '' -Remove
-        Write-C '    已移除 localeOverride（条件一撤销）' 'Green'
+        Write-C '    已移除 localeOverride' 'Green'
     } else { Write-C '    config.toml 不存在。' 'Gray' }
     $cu = Set-ComputerUseLocale '' -Reset
     if ($cu -eq 'reset') { Write-C '    computer-use/config.json 已还原' 'Green' }
-    Write-C '  注入的开关缓存保留在缓存里（不影响英文显示）；如需彻底清除请重置应用数据。' 'Gray'
+    Write-C '  开关缓存保留（不影响英文显示）' 'Gray'
+}
+
+# ---------------------------------------------------------------- 横幅
+function Get-ConWidth {
+    try { $w = $Host.UI.RawUI.WindowSize.Width; if ($w -ge 40) { return [int]$w } } catch { }
+    try { $w = [Console]::WindowWidth; if ($w -ge 40) { return [int]$w } } catch { }
+    100
+}
+
+$BannerFull = @(
+    '                             ▄▄▄▄▄▄        ▄     ▄               ▄▄               ▄  ▄   ▄                       '
+    '  ▄▄▄▄ ██████▀▀▀    ▀▀████▀▀ █▀▀▀▀█       ██    ██         ▄▄▄▄▄▄██▄▄▄▄▄▄     ▀█▄█▀▄▄██▄▄█▄▄      ▀▀▀▀▀▀▀▀███▀   '
+    '  █  █▄▄▄▄▄█▄▄▄▄▄    ▄████▄▄ █▀▀▀▀█     ██████ ▄██████        █  ▀█▀          ▄███ ▀▀██▀▀█▀▀▀          ▄▄█▀      '
+    '  █▀██  █▀ █ ▀█     ████████ ██████     ██   █▄█▀    █       ██  ███████     ▀▀  █  ▄█▄▄▄█▄▄     ▄     ██     ▄  '
+    '  █▄▄█▄█████████▄   ▀██▀████▄█▄██▄▄     ██▄▄▄█  ██   █     ▄██ ▄██ ▄▄ █▀       ▄██ ██▀▀██▀██    ▀▀▀▀▀▀▀██▀▀▀▀▀▀▀ '
+    '  █▀▀█  █  █  █      █▀  ▀███▀▀██▀▀     ██   █   ██ ██    ██▀█ ▀▀██ ▀██      ▄█▀ █ ██▄▄██▄██           ██        '
+    '  █▄██▀█▀█████▀█▀   ▄█▀▀▀▀██ ▀▀██▀▀     ██▄▄▄█      ██       █    ███▀           █ ██  ██ ██           ██        '
+    ' ▀█  ▀ ▄▄▄▄█▄▄▄▄    ▄███████▄▄▄██▄▄▄    ██▀▀▀█   ▄▄▄█▀       █ ▄▄██▀▀██▄▄▄    ▄▄█▀ █████████         ███▀        '
+    '                     ▀    ▀                       ▀▀         ▀ ▀▀      ▀▀      ▀    ▀      ▀                     '
+)
+$BannerMid = @(
+    '                  ▄▄▄▄▄▄  ▄▄▄▄▄       ▄    ▄▄             ▄▄             ▄  ▄  ▄▄       ▄            '
+    ' ▄███ ▀▀▀██▀▀▀    ▀▀█▀█▀▀██▄▄▄█▀     ▄█    ██       ▄████████████     ▀██▀▄▄█▄▄██▄▄     ▀▀▀▀▀▀███▀   '
+    ' ██▄██████████    ██████▄██▀▀▀█▄    █▀▀▀█ ▄█▀▀▀█       █▄ ▄█▄▄▄      ▄▄▀█   █▀ ██           ▄█▀      '
+    ' ██▀█▄▄█▄▄█▄█▄    ███████ █▀█▀▀     █   ██▀▄   █      ██ ▄█▀▀▀▀█        ██ ███████    ▄▄▄▄▄▄██▄▄▄▄▄▄ '
+    ' ████▀▀█▀▀█▀█▀▀   ██▀ ▀████▀██▀▀    █▀▀▀█  ▀█  █    ▄███▄██▄▀▄█▀      ▄███ █▄▄█▄▄█          ██       '
+    ' ██▄██▄████▄██▄   ███████▀▄▄██▄     █   █   ▀  █    ▀ ██  ▀█▄█▀      ▀▀ ██ █▀▀█▀▀█          ██       '
+    ' ██▀█ ▄▄▄██▄▄▄    ██▄▄▄██▄▄▄█▄▄▄    █▀▀▀█   ▄▄▄█      ██ ▄▄█▀█▄▄▄     ▄▄█  █▄██▄▄█        ▄▄██       '
+    '       ▀▀▀▀▀▀▀    ▀    ▀▀           ▀       ▀▀▀       ▀▀ ▀     ▀▀     ▀▀   ▀     ▀                   '
+)
+$BannerSmall = @(
+    '          ▄▄    ▄▄▄▄▄▄▄▄▄▄▄▄     ▄▄   ▄▄           ▄▄         ▄ ▄▄ ▄  ▄       ▄▄▄▄▄▄▄▄   '
+    ' ██▀█ ▀▀██▀▀     ████ ██▄▄██    ▄██▄  █▄▄▄    ▀██████▀▀▀▀▀    ▀█▀█▄██▄█▄▄     ▀▀▀▀▄██▀   '
+    ' ████▀█▀█▀▀█▀   ██████▀█▄▄██    █▀▀█▄█▀  ██     ██ ▄█▄▄▄▄    █▀▀█  █▄ █▄         ██      '
+    ' █▄▄█████████   ██████▄█▄█▄▄    █▄▄█▀ █▄ ██    ██ ▄█ ▄ █▀     ▄██ █▀▀█▀██   ▀▀▀▀▀██▀▀▀▀▀ '
+    ' ██▀█▄█▄█▄▄█▄   ██▄▄██▀▄██▄▄    █  ██  ▀ ██   ▀▀█▀▀▀█▄█▀     █▀ █ ███████        ██      '
+    ' ██▀█   ██      ██▄▄██▄▄██▄▄    █████   ▄█      █ ▄▄███▄▄      ▄█ █▄▄█▄██       ▄██      '
+    '      ▀▀▀▀▀▀    ▀    ▀▀▀▀▀▀▀    ▀      ▀▀       ▀ ▀▀   ▀▀▀    ▀▀  ▀    ▀▀       ▀        '
+)
+$BannerCompact = @(
+    '  ╔════════════════════════════════════════════╗'
+    '  ║  睡 醒 的 夜 猫 子  ·  Codex 一键汉化      ║'
+    '  ╚════════════════════════════════════════════╝'
+)
+
+function Show-Banner {
+    $w = Get-ConWidth
+    $lines = if ($w -ge 118) { $BannerFull }
+             elseif ($w -ge 106) { $BannerMid }
+             elseif ($w -ge 94)  { $BannerSmall }
+             else { $BannerCompact }
+    Write-Host ''
+    foreach ($ln in $lines) { Write-C (Center $ln) 'Cyan' }
+    Write-Host ''
+    Write-C (Center $script:Version) 'DarkGray'
+    Write-Host ''
 }
 
 # ---------------------------------------------------------------- 菜单
 function Show-Menu {
-    Write-Host ''
-    Write-C '  +----------------------------------------------------------+' 'DarkGray'
-    Write-C '  |  Codex 离线汉化 便携版  (完全离线 / 无需登录)                 |' 'White'
-    Write-C '  +----------------------------------------------------------+' 'DarkGray'
-    Write-C '    [1] 一键离线汉化   （写语言 + 注入开关，全程不联网）' 'White'
-    Write-C '    [2] 启动 Codex 应用' 'Gray'
-    Write-C '    [3] 还原英文设置   （撤销条件一）' 'Gray'
-    Write-C '    [4] 状态检查' 'Gray'
+    Write-C '    [1] 一键离线汉化' 'White'
+    Write-C '    [2] 启动 Codex' 'Gray'
+    Write-C '    [3] 还原英文' 'Gray'
     Write-C '    [0] 退出' 'Gray'
     Write-Host ''
 }
@@ -951,7 +1001,7 @@ function Start-Menu {
     while ($true) {
         Clear-Host
         Write-Host ''
-        Write-C ($script:AppName + '   ' + $script:Version) 'White'
+        Show-Banner
         Show-Status
         Show-Menu
         $c = Read-Host '  请选择'
@@ -959,7 +1009,6 @@ function Start-Menu {
             '1' { Invoke-OfflineInject }
             '2' { Invoke-Launch }
             '3' { Invoke-RestoreEn }
-            '4' { Show-Status | Out-Null }
             '0' { return }
             '' { }
         }
