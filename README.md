@@ -678,3 +678,17 @@ warning … sa_server_request_failed routePattern=/settings/user
 
 > 想要「开关齐全 + 中文」，只能让应用**真的连上一次 `ab.chatgpt.com`**（系统代理/TUN
 > 且规则覆盖该域名），让它自己把完整配置落盘 —— 那时就不需要离线注入了。
+
+## v2.1.5 修正（重要 · 注入 payload 的字段类型）
+
+注入用的 statsig 模板里，`feature_gates` / `dynamic_configs` 被写成了**空对象 `{}`**，
+而 statsig 的 `_seedLiveValues` 会用 `for…of` 迭代它们 —— 于是抛
+`TypeError: e.dynamic_configs is not iterable`，**statsig 初始化失败，整个应用界面渲染成空白页**
+（外部表现就是"卡在 logo 闪屏"）。
+
+- 已改为**数组 `[]`**；
+- 并**删掉 `live_entity_names`**（去掉它 SDK 会直接走安全出口 return，不再进入那段会抛错的代码路径）；
+- 另在写入前加了一道**正则兜底**，模板将来再被改错也不会打崩应用。
+
+> 如果你之前用过 v2.1.4 及更早版本注入过：那些注入的 payload 都带这个缺陷，
+> 建议**重跑一次 `[7]` 离线注入**覆盖掉。

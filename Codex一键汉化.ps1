@@ -53,6 +53,13 @@
         ④ 同一份 payload 改写成 4 个变体键名（uid 空 / ua-<sid> × cids 全量 / 仅
            stableID），不同 SDK 版本或登录态下取值不同时也能命中，纯冗余兜底。
 
+    · 【v2.1.5 修正 · 必看】注入模板里的 `feature_gates` / `dynamic_configs` 必须是
+      【数组 []】，`live_entity_names` 必须【删掉】。原模板把它们写成了空对象 {}，
+      而 statsig 的 `_seedLiveValues` 会用 for…of 迭代 dynamic_configs ——
+      于是抛 `TypeError: e.dynamic_configs is not iterable`，statsig 初始化失败，
+      整个 React 应用渲染成空白页（表现为"卡在 logo 闪屏"）。
+      已在模板里改正，并在 Invoke-OfflineInject 里加了一道正则兜底。
+
   【v2.1.4 变更】菜单与体验
     · [7] = 离线注入汉化开关（纯本地，秒级完成，不做任何联网探测）
       [8] = 在线诊断与修复（原来的远程开关自检，需要代理）
@@ -94,7 +101,7 @@ if ($PSScriptRoot) { $script:Root = $PSScriptRoot }
 else { $script:Root = Split-Path -Parent $MyInvocation.MyCommand.Definition }
 
 $script:AppName   = '睡醒的夜猫子 · Codex 一键汉化'
-$script:Version   = 'v2.1.4'
+$script:Version   = 'v2.1.5'
 $script:CfgPath   = Join-Path $env:USERPROFILE '.wakecat-i18n.json'
 $script:CodexHome = Join-Path $env:USERPROFILE '.codex'
 $script:ConfigToml = Join-Path $script:CodexHome 'config.toml'
@@ -116,7 +123,16 @@ $script:StatsigUrl   = 'https://ab.chatgpt.com/v1/initialize?k=client-sYWqzCYMRk
 #  · 缓存键 = DJB2("uid:|cids:source_surface_stable_id-<sid>,stableID-<sid>|k:<sdkKey>")，DJB2 初值为 0
 #  · stable_id 的存储键后缀 = DJB2("k:"+sdkKey) = 685440364，跨机器常量
 $script:OfflineStableId = '0e19a6c2-4a5b-4d8e-b3f7-2c9d8e1f0a36'   # 仅作参考，实际不再使用（凭空造 sid 会导致键对不上）
-$script:InnerTemplateB64 = 'H4sIAGCyqmoC/41Uy27bMBD8F51tQZKtV26FE6DpIwl6SFEUBUGTK5s1TQp8OFED/3uXkhy5SVP0JHG4OxzO7vIpaoA6b4BsqAMbXTwdZxHvFN0LRphWjdiMoKQdmDMoKrMsLdI6C/8YD9HFBM0i4yUQwRHk0FAvHWIWMJ1T0xF4bLXFU5Ho+49ZdABjhVbRRZrigkoPgVRqRpHEam9YYL++vEISUHQdqNMK453xgNoEJ65rQ4y3YK4vMUxYwuEgGJA1tYA6GiotYPpjKwUTjrTUoGiHJw8avOIgIbjAyRtCj8EGcQACygnXkXDr0Z2ejVinzQlxIliSllWd54uizOtFPou21BLf8sHqIB5N4bu7kDymQbh+L2IHXe8z80i7v77sF4MZBCU1NHzdYEbvc03rRQJsnidVM1+WvJjjmfmcc6izktGkLKtQhD4FPfrPjHDpDSgwFC+HSZYZ2oq5AhtKihfaEt8bHPGf61B5pvctVR2RzLtXBjhqNuAIbdtT1sJ8e/eR1yv6/uH281X6Zb+Vtw+fkIeDQa85aQRIPjihvXKmw6QPd6HEbUjP43IZF1WcLZeIrY1+wBYgzx0VpXkWJ3GCe9reTyhCcVakSdhANdNOVsR1UsVlUqXFRHj/V76boe2/CsUxaooe8dXWaPyZVKkXuLYnaKJA7PCmzLOtFzqHYUH813a+uomOQ2lCL/NdaKWT3VldLZJlXWZ5KBVVxGCvm9DydiAeu3JYjrtCbQjWP/RznOBsP4NrPHZ3Nl2v01osImUd8juH676OJ2yveVC8FyroDUIbSYeQYco5kXpD4IDzRkJbmT9Fjk/BP2JG2rNXq5/f/omxhHqnUWqDKVsiFL4FuDEOPwYXSYL5jZeSsC2wnfV7VFvVZbpMlxn2QZLhtCR5Fh1/A1jfDOFHBQAA'
+$script:InnerTemplateB64 = 'H4sIAAAAAAAC/41UyW7bMBT8F51tQZKtLbciCdB0SYIeUhRFQdDkk8WaJgUuTtTA/95HSY7SpCl6sjl8M5y36TFqgDpvgGypAxud' `
+    + 'ff+xiHiv6F4wwrRqxHYCJe3BzNBjVGZZWqR1Fv5jPERnM7SIjJdABEeQQ0O9dIhZQDqnpifw0GmLr07aBzBWaBWdpSkeqPQQRKVm' `
+    + 'FEWs9oYF9auLSxQBRTdBOq0w3hkPx0UkOHF9F2K8BXN1gWHCEg4HwYBsqAX00VBpAekPnRRMONJRg6Ydvjx68IqDhFAFTt4wesSn' `
+    + 'BhqxTg/YIyJOhNzTsqrzfFWUeb3KF1FLLfEdH2saXGL2fHcbyBMNQp7Dazvoh4Iyj7L7q4vhMGZN8O2Ghl83Zj0UtKb1KgG2zJOq' `
+    + 'Wa5LXizxzXzJOdRZyWhSllWo9kDBYvwnI2S3BQWGYnJIsszQTiwV2NA7TKglfqhkxH9uQouZ3ndU9UQy714VwFGzBUdo151YK/Pt' `
+    + '3Uden9P39zefL9Mv+1be3H9CHQ5GHLAOjQDJx0por5zpkfThNvSyC/Q8LtdxUcXZeo3Yxuh77DV5Gp0ozbM4iRO80/ZuRhGKsyJN' `
+    + 'wgW6mW+yIq6TKi6TKi1mwbu/6l2P8/1VKI5Rc/SEn7dG45/ZlXqBa3uCZgnEDm/afHb1wue4FYj/apfn19FxbE0YWr4Lo3Qqd1ZX' `
+    + 'q2Rdl1keWkUVMTjUJsy2HYWnqRyP061QW4L9D/McJ7jET+AGn909W6PXtA6bSFmP+s7heejjCdtrHhzvhQp+g9FG0jFkXGdOpN4S' `
+    + 'OIByJIyV+dPktPP/iJlkn32eJM4UGb4lllDvNFptkNISoXDp8WLacgwukgT5jZeSsBbYzvo9uq3qMl2n6wznIMlwW5I8i46/Aez+' `
+    + 'xfUwBQAA'
 
 # PowerShell 5.1 / .NET 4.x 默认可能只协商 TLS 1.0，直连 Cloudflare 会握手失败
 try {
@@ -1794,6 +1810,14 @@ function Invoke-OfflineInject {
         $msOut = New-Object System.IO.MemoryStream
         $gzs.CopyTo($msOut); $gzs.Dispose()
         $inner = [Text.Encoding]::UTF8.GetString($msOut.ToArray())
+    # 防御（v2.1.5）：statsig 对这几个字段的类型有硬性要求 ——
+    # feature_gates / dynamic_configs 必须是【数组】，写成对象会让 SDK 在
+    # _seedLiveValues 里抛 "dynamic_configs is not iterable"，导致整个界面渲染成空页；
+    # live_entity_names 存在则触发同一段代码路径，去掉它 SDK 会直接走安全出口。
+    # 这里再兜一次底，模板将来被改错也不会打崩应用。
+    $inner = [regex]::Replace($inner, '"feature_gates"\s*:\s*\{\s*\}', '"feature_gates":[]')
+    $inner = [regex]::Replace($inner, '"dynamic_configs"\s*:\s*\{\s*\}', '"dynamic_configs":[]')
+    $inner = [regex]::Replace($inner, ',\s*"live_entity_names"\s*:\s*\{[^{}]*\}', '')
     } catch {
         Write-C "  [X] 内置模板解压失败：$($_.Exception.Message)" 'Red'
         return
