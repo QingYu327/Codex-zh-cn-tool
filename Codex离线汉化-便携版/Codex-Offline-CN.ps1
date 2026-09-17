@@ -43,6 +43,94 @@ $script:InnerTemplateB64 = 'H4sIAAAAAAAC/41UyW7bMBT8F51tQZKtLbciCdB0SYIeUhRFQdDk
     + 'OIByJIyV+dPktPP/iJlkn32eJM4UGb4lllDvNFptkNISoXDp8WLacgwukgT5jZeSsBbYzvo9uq3qMl2n6wznIMlwW5I8i46/Aez+' `
     + 'xfUwBQAA'
 
+$BannerFull = @(
+    '                             ▄▄▄▄▄▄        ▄     ▄               ▄▄               ▄  ▄   ▄                       '
+    '  ▄▄▄▄ ██████▀▀▀    ▀▀████▀▀ █▀▀▀▀█       ██    ██         ▄▄▄▄▄▄██▄▄▄▄▄▄     ▀█▄█▀▄▄██▄▄█▄▄      ▀▀▀▀▀▀▀▀███▀   '
+    '  █  █▄▄▄▄▄█▄▄▄▄▄    ▄████▄▄ █▀▀▀▀█     ██████ ▄██████        █  ▀█▀          ▄███ ▀▀██▀▀█▀▀▀          ▄▄█▀      '
+    '  █▀██  █▀ █ ▀█     ████████ ██████     ██   █▄█▀    █       ██  ███████     ▀▀  █  ▄█▄▄▄█▄▄     ▄     ██     ▄  '
+    '  █▄▄█▄█████████▄   ▀██▀████▄█▄██▄▄     ██▄▄▄█  ██   █     ▄██ ▄██ ▄▄ █▀       ▄██ ██▀▀██▀██    ▀▀▀▀▀▀▀██▀▀▀▀▀▀▀ '
+    '  █▀▀█  █  █  █      █▀  ▀███▀▀██▀▀     ██   █   ██ ██    ██▀█ ▀▀██ ▀██      ▄█▀ █ ██▄▄██▄██           ██        '
+    '  █▄██▀█▀█████▀█▀   ▄█▀▀▀▀██ ▀▀██▀▀     ██▄▄▄█      ██       █    ███▀           █ ██  ██ ██           ██        '
+    ' ▀█  ▀ ▄▄▄▄█▄▄▄▄    ▄███████▄▄▄██▄▄▄    ██▀▀▀█   ▄▄▄█▀       █ ▄▄██▀▀██▄▄▄    ▄▄█▀ █████████         ███▀        '
+    '                     ▀    ▀                       ▀▀         ▀ ▀▀      ▀▀      ▀    ▀      ▀                     '
+)
+
+function Get-ConWidth {
+    try { $w = $Host.UI.RawUI.WindowSize.Width; if ($w -ge 40) { return [int]$w } } catch { }
+    try { $w = [Console]::WindowWidth; if ($w -ge 40) { return [int]$w } } catch { }
+    100
+}
+
+function Show-Banner {
+    $w = Get-ConWidth
+    if ($w -ge 118) { $lines = $BannerFull }
+    elseif ($w -ge 106) { $lines = $BannerMid }
+    elseif ($w -ge 94)  { $lines = $BannerSmall }
+    else { $lines = $BannerCompact }
+    Write-Host ''
+    foreach ($ln in $lines) { Write-C (Center $ln) 'Cyan' }
+    Write-Host ''
+    $sub = "$($script:Version)   .   " + (Get-Date -Format 'yyyy-MM-dd HH:mm')
+    Write-C (Center $sub) 'DarkGray'
+    Write-Host ''
+}
+
+$BannerFull = @(
+    '                             ▄▄▄▄▄▄        ▄     ▄               ▄▄               ▄  ▄   ▄                       '
+    '  ▄▄▄▄ ██████▀▀▀    ▀▀████▀▀ █▀▀▀▀█       ██    ██         ▄▄▄▄▄▄██▄▄▄▄▄▄     ▀█▄█▀▄▄██▄▄█▄▄      ▀▀▀▀▀▀▀▀███▀   '
+    '  █  █▄▄▄▄▄█▄▄▄▄▄    ▄████▄▄ █▀▀▀▀█     ██████ ▄██████        █  ▀█▀          ▄███ ▀▀██▀▀█▀▀▀          ▄▄█▀      '
+    '  █▀██  █▀ █ ▀█     ████████ ██████     ██   █▄█▀    █       ██  ███████     ▀▀  █  ▄█▄▄▄█▄▄     ▄     ██     ▄  '
+    '  █▄▄█▄█████████▄   ▀██▀████▄█▄██▄▄     ██▄▄▄█  ██   █     ▄██ ▄██ ▄▄ █▀       ▄██ ██▀▀██▀██    ▀▀▀▀▀▀▀██▀▀▀▀▀▀▀ '
+    '  █▀▀█  █  █  █      █▀  ▀███▀▀██▀▀     ██   █   ██ ██    ██▀█ ▀▀██ ▀██      ▄█▀ █ ██▄▄██▄██           ██        '
+    '  █▄██▀█▀█████▀█▀   ▄█▀▀▀▀██ ▀▀██▀▀     ██▄▄▄█      ██       █    ███▀           █ ██  ██ ██           ██        '
+    ' ▀█  ▀ ▄▄▄▄█▄▄▄▄    ▄███████▄▄▄██▄▄▄    ██▀▀▀█   ▄▄▄█▀       █ ▄▄██▀▀██▄▄▄    ▄▄█▀ █████████         ███▀        '
+    '                     ▀    ▀                       ▀▀         ▀ ▀▀      ▀▀      ▀    ▀      ▀                     '
+)
+$BannerMid = @(
+    '                  ▄▄▄▄▄▄  ▄▄▄▄▄       ▄    ▄▄             ▄▄             ▄  ▄  ▄▄       ▄            '
+    ' ▄███ ▀▀▀██▀▀▀    ▀▀█▀█▀▀██▄▄▄█▀     ▄█    ██       ▄████████████     ▀██▀▄▄█▄▄██▄▄     ▀▀▀▀▀▀███▀   '
+    ' ██▄██████████    ██████▄██▀▀▀█▄    █▀▀▀█ ▄█▀▀▀█       █▄ ▄█▄▄▄      ▄▄▀█   █▀ ██           ▄█▀      '
+    ' ██▀█▄▄█▄▄█▄█▄    ███████ █▀█▀▀     █   ██▀▄   █      ██ ▄█▀▀▀▀█        ██ ███████    ▄▄▄▄▄▄██▄▄▄▄▄▄ '
+    ' ████▀▀█▀▀█▀█▀▀   ██▀ ▀████▀██▀▀    █▀▀▀█  ▀█  █    ▄███▄██▄▀▄█▀      ▄███ █▄▄█▄▄█          ██       '
+    ' ██▄██▄████▄██▄   ███████▀▄▄██▄     █   █   ▀  █    ▀ ██  ▀█▄█▀      ▀▀ ██ █▀▀█▀▀█          ██       '
+    ' ██▀█ ▄▄▄██▄▄▄    ██▄▄▄██▄▄▄█▄▄▄    █▀▀▀█   ▄▄▄█      ██ ▄▄█▀█▄▄▄     ▄▄█  █▄██▄▄█        ▄▄██       '
+    '       ▀▀▀▀▀▀▀    ▀    ▀▀           ▀       ▀▀▀       ▀▀ ▀     ▀▀     ▀▀   ▀     ▀                   '
+)
+$BannerSmall = @(
+    '          ▄▄    ▄▄▄▄▄▄▄▄▄▄▄▄     ▄▄   ▄▄           ▄▄         ▄ ▄▄ ▄  ▄       ▄▄▄▄▄▄▄▄   '
+    ' ██▀█ ▀▀██▀▀     ████ ██▄▄██    ▄██▄  █▄▄▄    ▀██████▀▀▀▀▀    ▀█▀█▄██▄█▄▄     ▀▀▀▀▄██▀   '
+    ' ████▀█▀█▀▀█▀   ██████▀█▄▄██    █▀▀█▄█▀  ██     ██ ▄█▄▄▄▄    █▀▀█  █▄ █▄         ██      '
+    ' █▄▄█████████   ██████▄█▄█▄▄    █▄▄█▀ █▄ ██    ██ ▄█ ▄ █▀     ▄██ █▀▀█▀██   ▀▀▀▀▀██▀▀▀▀▀ '
+    ' ██▀█▄█▄█▄▄█▄   ██▄▄██▀▄██▄▄    █  ██  ▀ ██   ▀▀█▀▀▀█▄█▀     █▀ █ ███████        ██      '
+    ' ██▀█   ██      ██▄▄██▄▄██▄▄    █████   ▄█      █ ▄▄███▄▄      ▄█ █▄▄█▄██       ▄██      '
+    '      ▀▀▀▀▀▀    ▀    ▀▀▀▀▀▀▀    ▀      ▀▀       ▀ ▀▀   ▀▀▀    ▀▀  ▀    ▀▀       ▀        '
+)
+$BannerCompact = @(
+    '  ╔════════════════════════════════════════════╗'
+    '  ║  睡 醒 的 夜 猫 子  ·  Codex 一键汉化      ║'
+    '  ╚════════════════════════════════════════════╝'
+)
+
+function Get-ConWidth {
+    try { $w = $Host.UI.RawUI.WindowSize.Width; if ($w -ge 40) { return [int]$w } } catch { }
+    try { $w = [Console]::WindowWidth; if ($w -ge 40) { return [int]$w } } catch { }
+    100
+}
+
+function Show-Banner {
+    $w = Get-ConWidth
+    if ($w -ge 118) { $lines = $BannerFull }
+    elseif ($w -ge 106) { $lines = $BannerMid }
+    elseif ($w -ge 94)  { $lines = $BannerSmall }
+    else { $lines = $BannerCompact }
+    Write-Host ''
+    foreach ($ln in $lines) { Write-C (Center $ln) 'Cyan' }
+    Write-Host ''
+    $sub = "$($script:Version)   .   " + (Get-Date -Format 'yyyy-MM-dd HH:mm')
+    Write-C (Center $sub) 'DarkGray'
+    Write-Host ''
+}
+
 function PadR([string]$s, [int]$n) {
     $d = $n - (Get-DisplayWidth $s)
     if ($d -lt 1) { $d = 1 }
@@ -857,7 +945,7 @@ function Start-Menu {
     while ($true) {
         Clear-Host
         Write-Host ''
-        Write-C ($script:AppName + '   ' + $script:Version) 'White'
+        Show-Banner
         Show-Status
         Show-Menu
         $c = Read-Host '  请选择'
