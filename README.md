@@ -1,6 +1,6 @@
 <div align="center">
 
-# 睡醒的夜猫子 · Codex 一键汉化
+#  Codex 一键汉化
 
 **给 OpenAI Codex 桌面版（Microsoft Store / MSIX）换简体中文界面的 Windows 工具**
 
